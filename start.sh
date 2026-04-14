@@ -84,8 +84,18 @@ fi
 # Ensure correct ownership (may have been created by root on first run)
 chown -R postgres:postgres "$PG_DATA"
 
-# Start PostgreSQL as postgres user (cd /tmp to avoid permission warnings)
-cd /tmp && sudo -u postgres $PG_BIN/pg_ctl start -D "$PG_DATA" -l "$LOG_DIR/postgresql.log" -w -t 30
+# Stop any existing PostgreSQL instance and clean stale pid
+cd /tmp
+if sudo -u postgres $PG_BIN/pg_ctl status -D "$PG_DATA" > /dev/null 2>&1; then
+    echo "Stopping existing PostgreSQL..."
+    sudo -u postgres $PG_BIN/pg_ctl stop -D "$PG_DATA" -m fast -w || true
+    sleep 1
+fi
+# Remove stale pid file if exists
+rm -f "$PG_DATA/postmaster.pid"
+
+# Start PostgreSQL as postgres user
+sudo -u postgres $PG_BIN/pg_ctl start -D "$PG_DATA" -l "$LOG_DIR/postgresql.log" -w -t 30
 
 echo "PostgreSQL started."
 
