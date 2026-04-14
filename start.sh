@@ -7,10 +7,11 @@ echo "=== Nosara Backend Startup ==="
 # 1. Install system packages if not present
 # ----------------------------------------
 if ! command -v pg_isready &> /dev/null; then
-    echo "Installing PostgreSQL..."
+    echo "Installing PostgreSQL and system deps..."
     apt-get update -qq
     apt-get install -y --no-install-recommends \
         postgresql postgresql-client curl wget sudo \
+        software-properties-common \
         > /dev/null 2>&1
     rm -rf /var/lib/apt/lists/*
 fi
@@ -28,6 +29,19 @@ if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 export PATH="$HOME/.local/bin:$PATH"
+
+# ----------------------------------------
+# 1b. Ensure Python 3.12 is available
+# ----------------------------------------
+if ! python3.12 --version &> /dev/null; then
+    echo "Installing Python 3.12..."
+    add-apt-repository -y ppa:deadsnakes/ppa > /dev/null 2>&1
+    apt-get update -qq
+    apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3.12-dev \
+        > /dev/null 2>&1
+    rm -rf /var/lib/apt/lists/*
+fi
 
 # ----------------------------------------
 # 2. Setup data directories
@@ -55,7 +69,7 @@ if [ ! -d "$PG_DATA/base" ]; then
     echo "Initializing PostgreSQL data directory..."
     mkdir -p "$PG_DATA"
     chown -R postgres:postgres "$PG_DATA"
-    sudo -u postgres $PG_BIN/initdb -D "$PG_DATA"
+    cd /tmp && sudo -u postgres $PG_BIN/initdb -D "$PG_DATA"
 
     # Configure PostgreSQL
     cat >> "$PG_DATA/postgresql.conf" <<PGCONF
@@ -70,12 +84,13 @@ fi
 # Ensure correct ownership (may have been created by root on first run)
 chown -R postgres:postgres "$PG_DATA"
 
-# Start PostgreSQL as postgres user
-sudo -u postgres $PG_BIN/pg_ctl start -D "$PG_DATA" -l "$LOG_DIR/postgresql.log" -w -t 30
+# Start PostgreSQL as postgres user (cd /tmp to avoid permission warnings)
+cd /tmp && sudo -u postgres $PG_BIN/pg_ctl start -D "$PG_DATA" -l "$LOG_DIR/postgresql.log" -w -t 30
 
 echo "PostgreSQL started."
 
-# Create database and user if not exists
+# Create database and user if not exists (cd /tmp so postgres user has cwd access)
+cd /tmp
 sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='nosara'" | grep -q 1 \
     || sudo -u postgres psql -c "CREATE USER nosara WITH PASSWORD 'nosara';"
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='nosara'" | grep -q 1 \
@@ -109,12 +124,15 @@ echo "Setting up Python dependencies..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Install with uv (fast), fallback to pip
-if command -v uv &> /dev/null; then
-    uv pip install --system --no-cache -r requirements.txt
-else
-    pip install --no-cache-dir -r requirements.txt
+# Create venv with Python 3.12 and install deps with uv
+VENV_DIR="$DATA_DIR/venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating Python 3.12 virtual environment..."
+    uv venv --python python3.12 "$VENV_DIR"
 fi
+source "$VENV_DIR/bin/activate"
+echo "Installing Python dependencies..."
+uv pip install --no-cache -r requirements.txt
 
 # ----------------------------------------
 # 6. Set environment variables
