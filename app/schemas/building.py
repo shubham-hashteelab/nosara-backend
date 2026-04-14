@@ -17,6 +17,8 @@ class BuildingResponse(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
     name: str
+    total_floors: int = 0
+    total_flats: int = 0
     created_at: datetime
     updated_at: datetime
 

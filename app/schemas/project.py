@@ -19,6 +19,8 @@ class ProjectResponse(BaseModel):
     id: uuid.UUID
     name: str
     location: str
+    total_buildings: int = 0
+    total_flats: int = 0
     created_at: datetime
     updated_at: datetime
 

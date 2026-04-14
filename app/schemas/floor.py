@@ -17,6 +17,8 @@ class FloorResponse(BaseModel):
     id: uuid.UUID
     building_id: uuid.UUID
     floor_number: int
+    label: str = ""
+    total_flats: int = 0
     created_at: datetime
     updated_at: datetime
 

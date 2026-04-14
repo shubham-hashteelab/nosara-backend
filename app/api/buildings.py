@@ -2,16 +2,35 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, require_manager
 from app.models.building import Building
+from app.models.flat import Flat
+from app.models.floor import Floor
 from app.models.project import Project
 from app.models.user import User
 from app.schemas.building import BuildingCreate, BuildingResponse, BuildingUpdate
 
 router = APIRouter(tags=["buildings"])
+
+
+async def _enrich_building(building: Building, db: AsyncSession) -> dict:
+    """Add computed counts to a building."""
+    floor_count = await db.scalar(
+        select(func.count()).where(Floor.building_id == building.id)
+    )
+    flat_count = await db.scalar(
+        select(func.count())
+        .select_from(Flat)
+        .join(Floor, Flat.floor_id == Floor.id)
+        .where(Floor.building_id == building.id)
+    )
+    data = {c.key: getattr(building, c.key) for c in building.__table__.columns}
+    data["total_floors"] = floor_count or 0
+    data["total_flats"] = flat_count or 0
+    return data
 
 
 @router.get(
@@ -28,7 +47,7 @@ async def list_buildings(
         .order_by(Building.name)
     )
     buildings = result.scalars().all()
-    return [BuildingResponse.model_validate(b) for b in buildings]
+    return [BuildingResponse(**await _enrich_building(b, db)) for b in buildings]
 
 
 @router.post(
@@ -42,7 +61,6 @@ async def create_building(
     _manager: Annotated[User, Depends(require_manager)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BuildingResponse:
-    # Validate project
     proj = await db.execute(select(Project).where(Project.id == project_id))
     if not proj.scalars().first():
         raise HTTPException(status_code=404, detail="Project not found")
@@ -51,7 +69,7 @@ async def create_building(
     db.add(building)
     await db.commit()
     await db.refresh(building)
-    return BuildingResponse.model_validate(building)
+    return BuildingResponse(**await _enrich_building(building, db))
 
 
 @router.patch("/buildings/{building_id}", response_model=BuildingResponse)
@@ -71,7 +89,7 @@ async def update_building(
 
     await db.commit()
     await db.refresh(building)
-    return BuildingResponse.model_validate(building)
+    return BuildingResponse(**await _enrich_building(building, db))
 
 
 @router.delete("/buildings/{building_id}", status_code=status.HTTP_204_NO_CONTENT)
