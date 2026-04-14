@@ -30,6 +30,9 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+    assigned_project_ids: list[uuid.UUID] = []
+    assigned_building_ids: list[uuid.UUID] = []
+    assigned_flat_ids: list[uuid.UUID] = []
 
     model_config = ConfigDict(from_attributes=True)
 
