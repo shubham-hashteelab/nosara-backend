@@ -164,11 +164,12 @@ export CORS_ORIGINS='["*"]'
 # ----------------------------------------
 echo "Running database migrations..."
 if ! alembic upgrade head 2>&1; then
-    echo "Migration failed — resetting database and retrying..."
-    # Drop all objects and alembic version, then retry
+    echo "Migration failed — dropping and recreating database..."
     cd /tmp
-    sudo -u postgres psql -d nosara -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO nosara;"
+    sudo -u postgres psql -c "DROP DATABASE IF EXISTS nosara;"
+    sudo -u postgres psql -c "CREATE DATABASE nosara OWNER nosara;"
     cd "$SCRIPT_DIR"
+    echo "Retrying migration..."
     alembic upgrade head
 fi
 
