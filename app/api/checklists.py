@@ -6,7 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, require_manager
+from app.models.building import Building
 from app.models.checklist import ChecklistTemplate, FlatTypeRoom, FloorPlanLayout
+from app.models.flat import Flat
+from app.models.floor import Floor
+from app.models.project import Project
 from app.models.user import User
 from app.schemas.checklist import (
     ChecklistTemplateCreate,
@@ -137,6 +141,21 @@ SEED_FLOOR_PLAN_LAYOUTS: list[dict] = [
     {"flat_type": "1BHK", "room_label": "Bedroom", "x": 0.30, "y": 0.0, "width": 0.70, "height": 0.58},
     {"flat_type": "1BHK", "room_label": "Living Room", "x": 0.0, "y": 0.58, "width": 1.0, "height": 0.30},
     {"flat_type": "1BHK", "room_label": "Balcony", "x": 0.0, "y": 0.88, "width": 1.0, "height": 0.12},
+]
+
+SEED_PROJECTS: list[dict] = [
+    {"name": "Godrej Aria", "location": "Sector 79, Gurugram", "towers": 12},
+    {"name": "Godrej Meridien", "location": "Sector 106, Gurugram", "towers": 15},
+    {"name": "Godrej Woods", "location": "Sector 43, Noida", "towers": 10},
+    {"name": "Godrej Nurture", "location": "Sector 150, Noida", "towers": 18},
+    {"name": "Godrej Summit", "location": "Sector 104, Gurugram", "towers": 14},
+]
+
+FLOORS_PER_BUILDING = 10
+FLATS_PER_FLOOR = [
+    {"type": "2BHK", "position": 1},
+    {"type": "3BHK", "position": 2},
+    {"type": "2BHK", "position": 3},
 ]
 
 
@@ -278,6 +297,68 @@ async def seed_defaults(
         "checklist_templates": len(SEED_CHECKLIST_ITEMS),
         "flat_type_rooms": len(SEED_FLAT_TYPE_ROOMS),
         "floor_plan_layouts": len(SEED_FLOOR_PLAN_LAYOUTS),
+    }
+
+
+@router.post("/seed-hierarchy", status_code=status.HTTP_201_CREATED)
+async def seed_hierarchy(
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """Seed dummy projects, buildings, floors, and flats matching the Android SeedData."""
+    # Check if projects already exist to avoid duplicate seeding
+    existing = await db.execute(select(Project).limit(1))
+    if existing.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Projects already exist. Delete existing data before re-seeding.",
+        )
+
+    project_count = 0
+    building_count = 0
+    floor_count = 0
+    flat_count = 0
+
+    for proj_data in SEED_PROJECTS:
+        project = Project(name=proj_data["name"], location=proj_data["location"])
+        db.add(project)
+        await db.flush()  # get project.id
+        project_count += 1
+
+        tower_count: int = proj_data["towers"]
+        for t in range(1, tower_count + 1):
+            letter = chr(ord("A") + (t - 1) % 26)
+            tower_name = f"Tower {letter}{t}" if tower_count > 26 else f"Tower {letter}"
+
+            building = Building(project_id=project.id, name=tower_name)
+            db.add(building)
+            await db.flush()
+            building_count += 1
+
+            for f in range(1, FLOORS_PER_BUILDING + 1):
+                floor = Floor(building_id=building.id, floor_number=f)
+                db.add(floor)
+                await db.flush()
+                floor_count += 1
+
+                for flat_def in FLATS_PER_FLOOR:
+                    flat_number = f"{f}0{flat_def['position']}"
+                    flat = Flat(
+                        floor_id=floor.id,
+                        flat_number=flat_number,
+                        flat_type=flat_def["type"],
+                    )
+                    db.add(flat)
+                    flat_count += 1
+
+    await db.commit()
+
+    return {
+        "detail": "Hierarchy seeded",
+        "projects": project_count,
+        "buildings": building_count,
+        "floors": floor_count,
+        "flats": flat_count,
     }
 
 
