@@ -1,0 +1,453 @@
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db, require_manager
+from app.models.checklist import ChecklistTemplate, FlatTypeRoom, FloorPlanLayout
+from app.models.user import User
+from app.schemas.checklist import (
+    ChecklistTemplateCreate,
+    ChecklistTemplateResponse,
+    ChecklistTemplateUpdate,
+    FlatTypeRoomCreate,
+    FlatTypeRoomResponse,
+    FlatTypeRoomUpdate,
+    FloorPlanLayoutCreate,
+    FloorPlanLayoutResponse,
+    FloorPlanLayoutUpdate,
+)
+
+router = APIRouter(tags=["checklists"])
+
+# ---------------------------------------------------------------------------
+# Seed data from Android app's SeedData.kt
+# ---------------------------------------------------------------------------
+
+SEED_CHECKLIST_ITEMS: list[dict] = [
+    # LIVING_ROOM
+    {"room_type": "LIVING_ROOM", "category": "ELECTRICAL", "item_name": "Switches working", "sort_order": 1},
+    {"room_type": "LIVING_ROOM", "category": "ELECTRICAL", "item_name": "Lights working", "sort_order": 2},
+    {"room_type": "LIVING_ROOM", "category": "ELECTRICAL", "item_name": "Fan working", "sort_order": 3},
+    {"room_type": "LIVING_ROOM", "category": "PAINT", "item_name": "Wall paint finish", "sort_order": 4},
+    {"room_type": "LIVING_ROOM", "category": "PAINT", "item_name": "Ceiling paint", "sort_order": 5},
+    {"room_type": "LIVING_ROOM", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 6},
+    {"room_type": "LIVING_ROOM", "category": "CIVIL", "item_name": "Wall cracks or dampness", "sort_order": 7},
+    {"room_type": "LIVING_ROOM", "category": "DOORS_WINDOWS", "item_name": "Main door ok", "sort_order": 8},
+    {"room_type": "LIVING_ROOM", "category": "DOORS_WINDOWS", "item_name": "Windows open/close properly", "sort_order": 9},
+    # BEDROOM
+    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "Switches working", "sort_order": 1},
+    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "Lights working", "sort_order": 2},
+    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "Fan working", "sort_order": 3},
+    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "AC point available", "sort_order": 4},
+    {"room_type": "BEDROOM", "category": "PAINT", "item_name": "Wall paint finish", "sort_order": 5},
+    {"room_type": "BEDROOM", "category": "PAINT", "item_name": "Ceiling paint", "sort_order": 6},
+    {"room_type": "BEDROOM", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 7},
+    {"room_type": "BEDROOM", "category": "CIVIL", "item_name": "Wall cracks or dampness", "sort_order": 8},
+    {"room_type": "BEDROOM", "category": "DOORS_WINDOWS", "item_name": "Door opens/closes properly", "sort_order": 9},
+    {"room_type": "BEDROOM", "category": "DOORS_WINDOWS", "item_name": "Windows open/close properly", "sort_order": 10},
+    # KITCHEN
+    {"room_type": "KITCHEN", "category": "ELECTRICAL", "item_name": "Switches working", "sort_order": 1},
+    {"room_type": "KITCHEN", "category": "ELECTRICAL", "item_name": "Lights working", "sort_order": 2},
+    {"room_type": "KITCHEN", "category": "ELECTRICAL", "item_name": "Exhaust point available", "sort_order": 3},
+    {"room_type": "KITCHEN", "category": "PLUMBING", "item_name": "Sink tap working", "sort_order": 4},
+    {"room_type": "KITCHEN", "category": "PLUMBING", "item_name": "Sink drainage ok", "sort_order": 5},
+    {"room_type": "KITCHEN", "category": "PLUMBING", "item_name": "No water leakage", "sort_order": 6},
+    {"room_type": "KITCHEN", "category": "CIVIL", "item_name": "Wall tiles ok", "sort_order": 7},
+    {"room_type": "KITCHEN", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 8},
+    {"room_type": "KITCHEN", "category": "FIXTURES", "item_name": "Kitchen platform level", "sort_order": 9},
+    {"room_type": "KITCHEN", "category": "DOORS_WINDOWS", "item_name": "Windows open/close properly", "sort_order": 10},
+    # BATHROOM
+    {"room_type": "BATHROOM", "category": "ELECTRICAL", "item_name": "Light & exhaust working", "sort_order": 1},
+    {"room_type": "BATHROOM", "category": "ELECTRICAL", "item_name": "Geyser point available", "sort_order": 2},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Taps working (hot & cold)", "sort_order": 3},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Shower working", "sort_order": 4},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Flush working", "sort_order": 5},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Water drains properly", "sort_order": 6},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "No leakage", "sort_order": 7},
+    {"room_type": "BATHROOM", "category": "CIVIL", "item_name": "Wall tiles ok", "sort_order": 8},
+    {"room_type": "BATHROOM", "category": "CIVIL", "item_name": "Floor tiles ok (not slippery)", "sort_order": 9},
+    {"room_type": "BATHROOM", "category": "DOORS_WINDOWS", "item_name": "Door opens/closes properly", "sort_order": 10},
+    # BALCONY
+    {"room_type": "BALCONY", "category": "ELECTRICAL", "item_name": "Light point available", "sort_order": 1},
+    {"room_type": "BALCONY", "category": "PLUMBING", "item_name": "Water drains properly", "sort_order": 2},
+    {"room_type": "BALCONY", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 3},
+    {"room_type": "BALCONY", "category": "CIVIL", "item_name": "Railing strong & proper height", "sort_order": 4},
+    {"room_type": "BALCONY", "category": "DOORS_WINDOWS", "item_name": "Sliding door works properly", "sort_order": 5},
+    # COMMON_AREA
+    {"room_type": "COMMON_AREA", "category": "ELECTRICAL", "item_name": "Switches working", "sort_order": 1},
+    {"room_type": "COMMON_AREA", "category": "ELECTRICAL", "item_name": "Lights working", "sort_order": 2},
+    {"room_type": "COMMON_AREA", "category": "PAINT", "item_name": "Wall paint finish", "sort_order": 3},
+    {"room_type": "COMMON_AREA", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 4},
+]
+
+SEED_FLAT_TYPE_ROOMS: list[dict] = [
+    # 1BHK
+    {"flat_type": "1BHK", "room_type": "LIVING_ROOM", "label": "Living Room", "sort_order": 1},
+    {"flat_type": "1BHK", "room_type": "BEDROOM", "label": "Bedroom", "sort_order": 2},
+    {"flat_type": "1BHK", "room_type": "KITCHEN", "label": "Kitchen", "sort_order": 3},
+    {"flat_type": "1BHK", "room_type": "BATHROOM", "label": "Bathroom", "sort_order": 4},
+    {"flat_type": "1BHK", "room_type": "BALCONY", "label": "Balcony", "sort_order": 5},
+    # 2BHK
+    {"flat_type": "2BHK", "room_type": "LIVING_ROOM", "label": "Living Room", "sort_order": 1},
+    {"flat_type": "2BHK", "room_type": "BEDROOM", "label": "Bedroom 1", "sort_order": 2},
+    {"flat_type": "2BHK", "room_type": "BEDROOM", "label": "Bedroom 2", "sort_order": 3},
+    {"flat_type": "2BHK", "room_type": "KITCHEN", "label": "Kitchen", "sort_order": 4},
+    {"flat_type": "2BHK", "room_type": "BATHROOM", "label": "Bathroom 1", "sort_order": 5},
+    {"flat_type": "2BHK", "room_type": "BATHROOM", "label": "Bathroom 2", "sort_order": 6},
+    {"flat_type": "2BHK", "room_type": "BALCONY", "label": "Balcony", "sort_order": 7},
+    # 3BHK
+    {"flat_type": "3BHK", "room_type": "LIVING_ROOM", "label": "Living Room", "sort_order": 1},
+    {"flat_type": "3BHK", "room_type": "BEDROOM", "label": "Master Bedroom", "sort_order": 2},
+    {"flat_type": "3BHK", "room_type": "BEDROOM", "label": "Bedroom 2", "sort_order": 3},
+    {"flat_type": "3BHK", "room_type": "BEDROOM", "label": "Bedroom 3", "sort_order": 4},
+    {"flat_type": "3BHK", "room_type": "KITCHEN", "label": "Kitchen", "sort_order": 5},
+    {"flat_type": "3BHK", "room_type": "BATHROOM", "label": "Master Bathroom", "sort_order": 6},
+    {"flat_type": "3BHK", "room_type": "BATHROOM", "label": "Bathroom 2", "sort_order": 7},
+    {"flat_type": "3BHK", "room_type": "BATHROOM", "label": "Bathroom 3", "sort_order": 8},
+    {"flat_type": "3BHK", "room_type": "BALCONY", "label": "Balcony 1", "sort_order": 9},
+    {"flat_type": "3BHK", "room_type": "BALCONY", "label": "Balcony 2", "sort_order": 10},
+]
+
+SEED_FLOOR_PLAN_LAYOUTS: list[dict] = [
+    # 2BHK
+    {"flat_type": "2BHK", "room_label": "Bathroom 1", "x": 0.0, "y": 0.0, "width": 0.22, "height": 0.22},
+    {"flat_type": "2BHK", "room_label": "Kitchen", "x": 0.0, "y": 0.22, "width": 0.22, "height": 0.36},
+    {"flat_type": "2BHK", "room_label": "Bedroom 2", "x": 0.22, "y": 0.0, "width": 0.39, "height": 0.58},
+    {"flat_type": "2BHK", "room_label": "Bedroom 1", "x": 0.61, "y": 0.0, "width": 0.39, "height": 0.58},
+    {"flat_type": "2BHK", "room_label": "Living Room", "x": 0.0, "y": 0.58, "width": 0.72, "height": 0.30},
+    {"flat_type": "2BHK", "room_label": "Bathroom 2", "x": 0.72, "y": 0.58, "width": 0.28, "height": 0.30},
+    {"flat_type": "2BHK", "room_label": "Balcony", "x": 0.0, "y": 0.88, "width": 1.0, "height": 0.12},
+    # 3BHK
+    {"flat_type": "3BHK", "room_label": "Master Bathroom", "x": 0.0, "y": 0.0, "width": 0.18, "height": 0.22},
+    {"flat_type": "3BHK", "room_label": "Kitchen", "x": 0.0, "y": 0.22, "width": 0.18, "height": 0.33},
+    {"flat_type": "3BHK", "room_label": "Master Bedroom", "x": 0.18, "y": 0.0, "width": 0.32, "height": 0.55},
+    {"flat_type": "3BHK", "room_label": "Bedroom 2", "x": 0.50, "y": 0.0, "width": 0.25, "height": 0.55},
+    {"flat_type": "3BHK", "room_label": "Bedroom 3", "x": 0.75, "y": 0.0, "width": 0.25, "height": 0.55},
+    {"flat_type": "3BHK", "room_label": "Living Room", "x": 0.0, "y": 0.55, "width": 0.50, "height": 0.30},
+    {"flat_type": "3BHK", "room_label": "Bathroom 2", "x": 0.50, "y": 0.55, "width": 0.25, "height": 0.30},
+    {"flat_type": "3BHK", "room_label": "Bathroom 3", "x": 0.75, "y": 0.55, "width": 0.25, "height": 0.30},
+    {"flat_type": "3BHK", "room_label": "Balcony 1", "x": 0.0, "y": 0.85, "width": 0.50, "height": 0.15},
+    {"flat_type": "3BHK", "room_label": "Balcony 2", "x": 0.50, "y": 0.85, "width": 0.50, "height": 0.15},
+    # 1BHK
+    {"flat_type": "1BHK", "room_label": "Bathroom", "x": 0.0, "y": 0.0, "width": 0.30, "height": 0.28},
+    {"flat_type": "1BHK", "room_label": "Kitchen", "x": 0.0, "y": 0.28, "width": 0.30, "height": 0.30},
+    {"flat_type": "1BHK", "room_label": "Bedroom", "x": 0.30, "y": 0.0, "width": 0.70, "height": 0.58},
+    {"flat_type": "1BHK", "room_label": "Living Room", "x": 0.0, "y": 0.58, "width": 1.0, "height": 0.30},
+    {"flat_type": "1BHK", "room_label": "Balcony", "x": 0.0, "y": 0.88, "width": 1.0, "height": 0.12},
+]
+
+
+# ---------------------------------------------------------------------------
+# Checklist Template CRUD
+# ---------------------------------------------------------------------------
+
+
+@router.get("/checklist-templates", response_model=list[ChecklistTemplateResponse])
+async def list_checklist_templates(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ChecklistTemplateResponse]:
+    result = await db.execute(
+        select(ChecklistTemplate).order_by(
+            ChecklistTemplate.room_type, ChecklistTemplate.sort_order
+        )
+    )
+    templates = result.scalars().all()
+    return [ChecklistTemplateResponse.model_validate(t) for t in templates]
+
+
+@router.post(
+    "/checklist-templates",
+    response_model=ChecklistTemplateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_checklist_template(
+    body: ChecklistTemplateCreate,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ChecklistTemplateResponse:
+    template = ChecklistTemplate(
+        project_id=body.project_id,
+        room_type=body.room_type,
+        category=body.category,
+        item_name=body.item_name,
+        sort_order=body.sort_order,
+        is_active=body.is_active,
+    )
+    db.add(template)
+    await db.commit()
+    await db.refresh(template)
+    return ChecklistTemplateResponse.model_validate(template)
+
+
+@router.patch(
+    "/checklist-templates/{template_id}",
+    response_model=ChecklistTemplateResponse,
+)
+async def update_checklist_template(
+    template_id: uuid.UUID,
+    body: ChecklistTemplateUpdate,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ChecklistTemplateResponse:
+    result = await db.execute(
+        select(ChecklistTemplate).where(ChecklistTemplate.id == template_id)
+    )
+    template = result.scalars().first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    for field in ("room_type", "category", "item_name", "sort_order", "is_active"):
+        value = getattr(body, field, None)
+        if value is not None:
+            setattr(template, field, value)
+
+    await db.commit()
+    await db.refresh(template)
+    return ChecklistTemplateResponse.model_validate(template)
+
+
+@router.delete(
+    "/checklist-templates/{template_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_checklist_template(
+    template_id: uuid.UUID,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    result = await db.execute(
+        select(ChecklistTemplate).where(ChecklistTemplate.id == template_id)
+    )
+    template = result.scalars().first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    await db.delete(template)
+    await db.commit()
+
+
+@router.post("/checklist-templates/seed-defaults", status_code=status.HTTP_201_CREATED)
+async def seed_defaults(
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """Seed the default checklist templates, flat type rooms, and floor plan layouts."""
+    # Seed checklist templates
+    for item in SEED_CHECKLIST_ITEMS:
+        template = ChecklistTemplate(
+            project_id=None,
+            room_type=item["room_type"],
+            category=item["category"],
+            item_name=item["item_name"],
+            sort_order=item["sort_order"],
+        )
+        db.add(template)
+
+    # Seed flat type rooms
+    for room in SEED_FLAT_TYPE_ROOMS:
+        ftr = FlatTypeRoom(
+            project_id=None,
+            flat_type=room["flat_type"],
+            room_type=room["room_type"],
+            label=room["label"],
+            sort_order=room["sort_order"],
+        )
+        db.add(ftr)
+
+    # Seed floor plan layouts
+    for layout in SEED_FLOOR_PLAN_LAYOUTS:
+        fpl = FloorPlanLayout(
+            project_id=None,
+            flat_type=layout["flat_type"],
+            room_label=layout["room_label"],
+            x=layout["x"],
+            y=layout["y"],
+            width=layout["width"],
+            height=layout["height"],
+        )
+        db.add(fpl)
+
+    await db.commit()
+
+    return {
+        "detail": "Defaults seeded",
+        "checklist_templates": len(SEED_CHECKLIST_ITEMS),
+        "flat_type_rooms": len(SEED_FLAT_TYPE_ROOMS),
+        "floor_plan_layouts": len(SEED_FLOOR_PLAN_LAYOUTS),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Flat Type Room CRUD
+# ---------------------------------------------------------------------------
+
+
+@router.get("/flat-type-rooms", response_model=list[FlatTypeRoomResponse])
+async def list_flat_type_rooms(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[FlatTypeRoomResponse]:
+    result = await db.execute(
+        select(FlatTypeRoom).order_by(FlatTypeRoom.flat_type, FlatTypeRoom.sort_order)
+    )
+    rooms = result.scalars().all()
+    return [FlatTypeRoomResponse.model_validate(r) for r in rooms]
+
+
+@router.post(
+    "/flat-type-rooms",
+    response_model=FlatTypeRoomResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_flat_type_room(
+    body: FlatTypeRoomCreate,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> FlatTypeRoomResponse:
+    room = FlatTypeRoom(
+        project_id=body.project_id,
+        flat_type=body.flat_type,
+        room_type=body.room_type,
+        label=body.label,
+        sort_order=body.sort_order,
+    )
+    db.add(room)
+    await db.commit()
+    await db.refresh(room)
+    return FlatTypeRoomResponse.model_validate(room)
+
+
+@router.patch("/flat-type-rooms/{room_id}", response_model=FlatTypeRoomResponse)
+async def update_flat_type_room(
+    room_id: uuid.UUID,
+    body: FlatTypeRoomUpdate,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> FlatTypeRoomResponse:
+    result = await db.execute(
+        select(FlatTypeRoom).where(FlatTypeRoom.id == room_id)
+    )
+    room = result.scalars().first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Flat type room not found")
+
+    for field in ("flat_type", "room_type", "label", "sort_order"):
+        value = getattr(body, field, None)
+        if value is not None:
+            setattr(room, field, value)
+
+    await db.commit()
+    await db.refresh(room)
+    return FlatTypeRoomResponse.model_validate(room)
+
+
+@router.delete(
+    "/flat-type-rooms/{room_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_flat_type_room(
+    room_id: uuid.UUID,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    result = await db.execute(
+        select(FlatTypeRoom).where(FlatTypeRoom.id == room_id)
+    )
+    room = result.scalars().first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Flat type room not found")
+
+    await db.delete(room)
+    await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Floor Plan Layout CRUD
+# ---------------------------------------------------------------------------
+
+
+@router.get("/floor-plan-layouts", response_model=list[FloorPlanLayoutResponse])
+async def list_floor_plan_layouts(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[FloorPlanLayoutResponse]:
+    result = await db.execute(
+        select(FloorPlanLayout).order_by(
+            FloorPlanLayout.flat_type, FloorPlanLayout.room_label
+        )
+    )
+    layouts = result.scalars().all()
+    return [FloorPlanLayoutResponse.model_validate(l) for l in layouts]
+
+
+@router.post(
+    "/floor-plan-layouts",
+    response_model=FloorPlanLayoutResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_floor_plan_layout(
+    body: FloorPlanLayoutCreate,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> FloorPlanLayoutResponse:
+    layout = FloorPlanLayout(
+        project_id=body.project_id,
+        flat_type=body.flat_type,
+        room_label=body.room_label,
+        x=body.x,
+        y=body.y,
+        width=body.width,
+        height=body.height,
+    )
+    db.add(layout)
+    await db.commit()
+    await db.refresh(layout)
+    return FloorPlanLayoutResponse.model_validate(layout)
+
+
+@router.patch(
+    "/floor-plan-layouts/{layout_id}", response_model=FloorPlanLayoutResponse
+)
+async def update_floor_plan_layout(
+    layout_id: uuid.UUID,
+    body: FloorPlanLayoutUpdate,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> FloorPlanLayoutResponse:
+    result = await db.execute(
+        select(FloorPlanLayout).where(FloorPlanLayout.id == layout_id)
+    )
+    layout = result.scalars().first()
+    if not layout:
+        raise HTTPException(status_code=404, detail="Floor plan layout not found")
+
+    for field in ("flat_type", "room_label", "x", "y", "width", "height"):
+        value = getattr(body, field, None)
+        if value is not None:
+            setattr(layout, field, value)
+
+    await db.commit()
+    await db.refresh(layout)
+    return FloorPlanLayoutResponse.model_validate(layout)
+
+
+@router.delete(
+    "/floor-plan-layouts/{layout_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_floor_plan_layout(
+    layout_id: uuid.UUID,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    result = await db.execute(
+        select(FloorPlanLayout).where(FloorPlanLayout.id == layout_id)
+    )
+    layout = result.scalars().first()
+    if not layout:
+        raise HTTPException(status_code=404, detail="Floor plan layout not found")
+
+    await db.delete(layout)
+    await db.commit()
