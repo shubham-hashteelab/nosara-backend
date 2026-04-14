@@ -163,7 +163,14 @@ export CORS_ORIGINS='["*"]'
 # 7. Run database migrations
 # ----------------------------------------
 echo "Running database migrations..."
-alembic upgrade head || echo "WARNING: Alembic migration failed — check alembic config"
+if ! alembic upgrade head 2>&1; then
+    echo "Migration failed — resetting database and retrying..."
+    # Drop all objects and alembic version, then retry
+    cd /tmp
+    sudo -u postgres psql -d nosara -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO nosara;"
+    cd "$SCRIPT_DIR"
+    alembic upgrade head
+fi
 
 # ----------------------------------------
 # 8. Start FastAPI

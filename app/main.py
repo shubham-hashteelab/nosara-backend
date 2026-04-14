@@ -18,9 +18,12 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     logger.info("Starting up Nosara backend...")
 
     # Create default manager if no users exist
-    async with async_session_factory() as db:
-        await create_default_manager(db)
-        logger.info("Default manager check complete.")
+    try:
+        async with async_session_factory() as db:
+            await create_default_manager(db)
+            logger.info("Default manager check complete.")
+    except Exception as exc:
+        logger.warning("Could not check/create default manager (tables may not exist yet): %s", exc)
 
     # Ensure MinIO bucket exists
     try:
