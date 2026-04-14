@@ -19,7 +19,6 @@ from app.schemas.sync import SyncOperation, SyncRejection
 
 logger = logging.getLogger(__name__)
 
-# Maps entity_type string to SQLAlchemy model
 ENTITY_MODEL_MAP: dict[str, Any] = {
     "project": Project,
     "building": Building,
@@ -40,7 +39,6 @@ class SyncService:
         inspector_id: uuid.UUID,
         db: AsyncSession,
     ) -> tuple[list[str], list[SyncRejection]]:
-        """Process a list of sync push operations from a client."""
         accepted: list[str] = []
         rejected: list[SyncRejection] = []
 
@@ -49,10 +47,7 @@ class SyncService:
                 model = ENTITY_MODEL_MAP.get(op.entity_type)
                 if model is None:
                     rejected.append(
-                        SyncRejection(
-                            id=op.entity_id,
-                            reason=f"Unknown entity type: {op.entity_type}",
-                        )
+                        SyncRejection(id=op.entity_id, reason=f"Unknown entity type: {op.entity_type}")
                     )
                     continue
 
@@ -67,17 +62,10 @@ class SyncService:
                     accepted.append(str(op.entity_id))
 
                 elif op.operation == "UPDATE":
-                    result = await db.execute(
-                        select(model).where(model.id == op.entity_id)
-                    )
+                    result = await db.execute(select(model).where(model.id == op.entity_id))
                     obj = result.scalars().first()
                     if obj is None:
-                        rejected.append(
-                            SyncRejection(
-                                id=op.entity_id,
-                                reason=f"{op.entity_type} not found",
-                            )
-                        )
+                        rejected.append(SyncRejection(id=op.entity_id, reason=f"{op.entity_type} not found"))
                         continue
                     for key, value in op.data.items():
                         if hasattr(obj, key):
@@ -86,9 +74,7 @@ class SyncService:
                     accepted.append(str(op.entity_id))
 
                 elif op.operation == "DELETE":
-                    result = await db.execute(
-                        select(model).where(model.id == op.entity_id)
-                    )
+                    result = await db.execute(select(model).where(model.id == op.entity_id))
                     obj = result.scalars().first()
                     if obj:
                         await db.delete(obj)
@@ -96,70 +82,116 @@ class SyncService:
                     accepted.append(str(op.entity_id))
 
                 else:
-                    rejected.append(
-                        SyncRejection(
-                            id=op.entity_id,
-                            reason=f"Unknown operation: {op.operation}",
-                        )
-                    )
+                    rejected.append(SyncRejection(id=op.entity_id, reason=f"Unknown operation: {op.operation}"))
 
             except Exception as exc:
-                logger.error(
-                    "Sync push error for %s %s: %s",
-                    op.entity_type,
-                    op.entity_id,
-                    exc,
-                )
-                rejected.append(
-                    SyncRejection(id=op.entity_id, reason=str(exc))
-                )
+                logger.error("Sync push error for %s %s: %s", op.entity_type, op.entity_id, exc)
+                rejected.append(SyncRejection(id=op.entity_id, reason=str(exc)))
 
         await db.commit()
         return accepted, rejected
 
-    async def _resolve_accessible_flat_ids(
+    async def _resolve_scope(
         self,
         user_id: uuid.UUID,
         db: AsyncSession,
-    ) -> set[uuid.UUID] | None:
+    ) -> dict[str, set[uuid.UUID]]:
         """
-        Resolve the set of flat IDs a user can access based on granular assignments.
-        Returns None if the user has project-level access (= all flats in those projects).
-        Returns a set of specific flat IDs if building or flat level assignments exist.
+        Resolve the complete access scope for a user by combining all assignment levels.
+        Returns dict with 'project_ids', 'building_ids', 'floor_ids', 'flat_ids'.
 
-        Priority: flat assignments > building assignments > project assignments.
-        If ANY flat assignments exist, only those flats are visible.
-        If ANY building assignments exist (but no flat assignments), those buildings' flats.
-        Otherwise, project-level access returns None (handled by caller).
+        Logic: union all levels. If you have project access, all buildings/floors/flats
+        in that project are included. If you have building access, the parent project
+        is also included (for navigation). Same for flat access.
         """
-        # Check flat-level assignments
-        flat_assign_q = await db.execute(
-            select(UserFlatAssignment.flat_id).where(
-                UserFlatAssignment.user_id == user_id
-            )
+        # 1. Get direct assignments
+        proj_q = await db.execute(
+            select(UserProjectAssignment.project_id).where(UserProjectAssignment.user_id == user_id)
         )
-        flat_ids = {row[0] for row in flat_assign_q.all()}
-        if flat_ids:
-            return flat_ids
+        assigned_project_ids = {row[0] for row in proj_q.all()}
 
-        # Check building-level assignments
-        bldg_assign_q = await db.execute(
-            select(UserBuildingAssignment.building_id).where(
-                UserBuildingAssignment.user_id == user_id
-            )
+        bldg_q = await db.execute(
+            select(UserBuildingAssignment.building_id).where(UserBuildingAssignment.user_id == user_id)
         )
-        building_ids = {row[0] for row in bldg_assign_q.all()}
-        if building_ids:
-            # Get all flats in those buildings
-            flats_q = await db.execute(
-                select(Flat.id)
-                .join(Floor, Flat.floor_id == Floor.id)
-                .where(Floor.building_id.in_(building_ids))
-            )
-            return {row[0] for row in flats_q.all()}
+        assigned_building_ids = {row[0] for row in bldg_q.all()}
 
-        # No granular assignments — return None to signal project-level access
-        return None
+        flat_q = await db.execute(
+            select(UserFlatAssignment.flat_id).where(UserFlatAssignment.user_id == user_id)
+        )
+        assigned_flat_ids = {row[0] for row in flat_q.all()}
+
+        # 2. Expand project assignments → all buildings, floors, flats
+        all_building_ids: set[uuid.UUID] = set(assigned_building_ids)
+        all_floor_ids: set[uuid.UUID] = set()
+        all_flat_ids: set[uuid.UUID] = set(assigned_flat_ids)
+        all_project_ids: set[uuid.UUID] = set(assigned_project_ids)
+
+        if assigned_project_ids:
+            # All buildings in assigned projects
+            bq = await db.execute(
+                select(Building.id).where(Building.project_id.in_(assigned_project_ids))
+            )
+            project_building_ids = {row[0] for row in bq.all()}
+            all_building_ids |= project_building_ids
+
+        # 3. From building-level assignments, derive parent projects (for navigation)
+        if assigned_building_ids:
+            parent_q = await db.execute(
+                select(Building.project_id).where(Building.id.in_(assigned_building_ids))
+            )
+            all_project_ids |= {row[0] for row in parent_q.all()}
+
+        # 4. From flat-level assignments, derive parent floors, buildings, projects
+        if assigned_flat_ids:
+            flat_parents_q = await db.execute(
+                select(Floor.id, Floor.building_id, Building.project_id)
+                .join(Flat, Flat.floor_id == Floor.id)
+                .join(Building, Floor.building_id == Building.id)
+                .where(Flat.id.in_(assigned_flat_ids))
+            )
+            for floor_id, building_id, project_id in flat_parents_q.all():
+                all_floor_ids.add(floor_id)
+                all_building_ids.add(building_id)
+                all_project_ids.add(project_id)
+
+        # 5. Expand all buildings → their floors
+        if all_building_ids:
+            fq = await db.execute(
+                select(Floor.id).where(Floor.building_id.in_(all_building_ids))
+            )
+            all_floor_ids |= {row[0] for row in fq.all()}
+
+        # 6. Expand all floors → their flats (only for project/building level access)
+        # For flat-level-only users, we already have the specific flat IDs
+        if assigned_project_ids or assigned_building_ids:
+            # Get flats from floors belonging to project/building assignments
+            expandable_floor_ids = set()
+            if assigned_project_ids:
+                # All floors in project-level buildings
+                pf_q = await db.execute(
+                    select(Floor.id)
+                    .join(Building, Floor.building_id == Building.id)
+                    .where(Building.project_id.in_(assigned_project_ids))
+                )
+                expandable_floor_ids |= {row[0] for row in pf_q.all()}
+            if assigned_building_ids:
+                bf_q = await db.execute(
+                    select(Floor.id).where(Floor.building_id.in_(assigned_building_ids))
+                )
+                expandable_floor_ids |= {row[0] for row in bf_q.all()}
+
+            if expandable_floor_ids:
+                flat_exp_q = await db.execute(
+                    select(Flat.id).where(Flat.floor_id.in_(expandable_floor_ids))
+                )
+                all_flat_ids |= {row[0] for row in flat_exp_q.all()}
+
+        return {
+            "project_ids": all_project_ids,
+            "building_ids": all_building_ids,
+            "floor_ids": all_floor_ids,
+            "flat_ids": all_flat_ids,
+        }
 
     async def process_pull(
         self,
@@ -168,84 +200,63 @@ class SyncService:
         db: AsyncSession,
     ) -> dict[str, Any]:
         """Pull all data updated since last_synced_at for the user's accessible scope."""
-        # Get user's assigned project IDs (always needed as the base scope)
-        assignment_result = await db.execute(
-            select(UserProjectAssignment.project_id).where(
-                UserProjectAssignment.user_id == user_id
-            )
-        )
-        project_ids = [row[0] for row in assignment_result.all()]
+        scope = await self._resolve_scope(user_id, db)
 
-        # Check for granular (building/flat) access
-        specific_flat_ids = await self._resolve_accessible_flat_ids(user_id, db)
+        project_ids = scope["project_ids"]
+        building_ids = scope["building_ids"]
+        floor_ids = scope["floor_ids"]
+        flat_ids = scope["flat_ids"]
 
-        # Projects — always filtered by project assignments
-        projects_q = await db.execute(
-            select(Project).where(
-                Project.updated_at >= last_synced_at,
-                Project.id.in_(project_ids) if project_ids else False,
-            )
-        )
-        projects = projects_q.scalars().all()
-
-        # Buildings — filter by project, then optionally by building assignments
-        bldg_assign_q = await db.execute(
-            select(UserBuildingAssignment.building_id).where(
-                UserBuildingAssignment.user_id == user_id
-            )
-        )
-        assigned_building_ids = {row[0] for row in bldg_assign_q.all()}
-
-        buildings_q_stmt = select(Building).where(
-            Building.updated_at >= last_synced_at,
-            Building.project_id.in_(project_ids) if project_ids else False,
-        )
-        if assigned_building_ids:
-            buildings_q_stmt = buildings_q_stmt.where(
-                Building.id.in_(assigned_building_ids)
-            )
-        buildings_q = await db.execute(buildings_q_stmt)
-        buildings = buildings_q.scalars().all()
-
-        # Floors
-        building_ids_in_scope = [b.id for b in buildings]
-        if building_ids_in_scope:
-            floors_q = await db.execute(
-                select(Floor).where(
-                    Floor.updated_at >= last_synced_at,
-                    Floor.building_id.in_(building_ids_in_scope),
+        # Projects
+        if project_ids:
+            projects_q = await db.execute(
+                select(Project).where(
+                    Project.updated_at >= last_synced_at,
+                    Project.id.in_(project_ids),
                 )
             )
         else:
-            floors_q = await db.execute(
-                select(Floor).where(False)
-            )
-        floors = floors_q.scalars().all()
+            projects_q = await db.execute(select(Project).where(False))
+        projects = projects_q.scalars().all()
 
-        # Flats — apply granular filter if exists
-        floor_ids_in_scope = [f.id for f in floors]
-        if specific_flat_ids is not None:
-            # Granular: only specific flats
-            flats_q = await db.execute(
-                select(Flat).where(
-                    Flat.updated_at >= last_synced_at,
-                    Flat.id.in_(specific_flat_ids) if specific_flat_ids else False,
+        # Buildings
+        if building_ids:
+            buildings_q = await db.execute(
+                select(Building).where(
+                    Building.updated_at >= last_synced_at,
+                    Building.id.in_(building_ids),
                 )
             )
-        elif floor_ids_in_scope:
+        else:
+            buildings_q = await db.execute(select(Building).where(False))
+        buildings = buildings_q.scalars().all()
+
+        # Floors
+        if floor_ids:
+            floors_q = await db.execute(
+                select(Floor).where(
+                    Floor.updated_at >= last_synced_at,
+                    Floor.id.in_(floor_ids),
+                )
+            )
+        else:
+            floors_q = await db.execute(select(Floor).where(False))
+        floors = floors_q.scalars().all()
+
+        # Flats
+        if flat_ids:
             flats_q = await db.execute(
                 select(Flat).where(
                     Flat.updated_at >= last_synced_at,
-                    Flat.floor_id.in_(floor_ids_in_scope),
+                    Flat.id.in_(flat_ids),
                 )
             )
         else:
             flats_q = await db.execute(select(Flat).where(False))
         flats = flats_q.scalars().all()
 
-        # Inspection entries — only for accessible flats
-        flat_ids_in_scope = [f.id for f in flats]
-        if flat_ids_in_scope:
+        # Inspection entries for accessible flats
+        if flat_ids:
             entries_q = await db.execute(
                 select(InspectionEntry)
                 .options(
@@ -255,25 +266,21 @@ class SyncService:
                 )
                 .where(
                     InspectionEntry.updated_at >= last_synced_at,
-                    InspectionEntry.flat_id.in_(flat_ids_in_scope),
+                    InspectionEntry.flat_id.in_(flat_ids),
                 )
             )
         else:
-            entries_q = await db.execute(
-                select(InspectionEntry).where(False)
-            )
+            entries_q = await db.execute(select(InspectionEntry).where(False))
         entries = entries_q.scalars().all()
 
-        # Global data (not scoped by assignments)
+        # Global data
         contractors_q = await db.execute(
             select(Contractor).where(Contractor.updated_at >= last_synced_at)
         )
         contractors = contractors_q.scalars().all()
 
         templates_q = await db.execute(
-            select(ChecklistTemplate).where(
-                ChecklistTemplate.updated_at >= last_synced_at
-            )
+            select(ChecklistTemplate).where(ChecklistTemplate.updated_at >= last_synced_at)
         )
         templates = templates_q.scalars().all()
 
