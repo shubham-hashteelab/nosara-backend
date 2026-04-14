@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Resolve script directory upfront (before any cd)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 echo "=== Nosara Backend Startup ==="
 
 # ----------------------------------------
@@ -130,9 +133,9 @@ done
 # ----------------------------------------
 echo "Setting up Python dependencies..."
 
-# Figure out where the app code is
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Go back to the app code directory
 cd "$SCRIPT_DIR"
+echo "Working directory: $(pwd)"
 
 # Create venv with Python 3.12 and install deps with uv
 VENV_DIR="$DATA_DIR/venv"
