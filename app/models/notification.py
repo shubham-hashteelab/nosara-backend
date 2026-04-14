@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import DateTime, Enum, String, Text
+from sqlalchemy import DateTime, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,10 +21,8 @@ class NotificationLog(Base):
     subject: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
-        Enum("PENDING", "SENT", "FAILED", name="notification_status"),
-        default="PENDING",
-        nullable=False,
-    )
+        String(20), default="PENDING", nullable=False
+    )  # PENDING, SENT, FAILED
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

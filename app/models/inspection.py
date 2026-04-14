@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -24,17 +24,15 @@ class InspectionEntry(Base):
     category: Mapped[str] = mapped_column(String(100), nullable=False)
     item_name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(
-        Enum("OK", "SNAG", "NA", name="entry_status"), default="NA", nullable=False
-    )
+        String(10), default="NA", nullable=False
+    )  # PASS, FAIL, NA
     severity: Mapped[Optional[str]] = mapped_column(
-        Enum("LOW", "MEDIUM", "HIGH", "CRITICAL", name="severity_level"), nullable=True
-    )
+        String(20), nullable=True
+    )  # CRITICAL, MAJOR, MINOR
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     snag_fix_status: Mapped[str] = mapped_column(
-        Enum("OPEN", "IN_PROGRESS", "FIXED", "VERIFIED", name="snag_fix_status"),
-        default="OPEN",
-        nullable=False,
-    )
+        String(20), default="OPEN", nullable=False
+    )  # OPEN, FIXED, VERIFIED
     inspector_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )

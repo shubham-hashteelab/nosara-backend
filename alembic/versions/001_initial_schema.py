@@ -19,24 +19,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # --- Enum types ---
-    user_role = sa.Enum("MANAGER", "INSPECTOR", name="user_role")
-    user_role.create(op.get_bind(), checkfirst=True)
-
-    inspection_status = sa.Enum("NOT_STARTED", "IN_PROGRESS", "COMPLETED", name="inspection_status")
-    inspection_status.create(op.get_bind(), checkfirst=True)
-
-    entry_status = sa.Enum("OK", "SNAG", "NA", name="entry_status")
-    entry_status.create(op.get_bind(), checkfirst=True)
-
-    severity_level = sa.Enum("LOW", "MEDIUM", "HIGH", "CRITICAL", name="severity_level")
-    severity_level.create(op.get_bind(), checkfirst=True)
-
-    snag_fix_status = sa.Enum("OPEN", "IN_PROGRESS", "FIXED", "VERIFIED", name="snag_fix_status")
-    snag_fix_status.create(op.get_bind(), checkfirst=True)
-
-    notification_status = sa.Enum("PENDING", "SENT", "FAILED", name="notification_status")
-    notification_status.create(op.get_bind(), checkfirst=True)
+    # All enum values stored as plain strings (VARCHAR) — no PostgreSQL enum types.
+    # This matches the Android app pattern and avoids enum migration headaches.
 
     # --- users ---
     op.create_table(
@@ -45,10 +29,10 @@ def upgrade() -> None:
         sa.Column("username", sa.String(150), unique=True, nullable=False),
         sa.Column("password_hash", sa.String(255), nullable=False),
         sa.Column("full_name", sa.String(255), nullable=False),
-        sa.Column("role", user_role, nullable=False),
-        sa.Column("is_active", sa.Boolean(), default=True, nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("role", sa.String(20), nullable=False),  # MANAGER, INSPECTOR
+        sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- projects ---
@@ -57,8 +41,8 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("location", sa.String(500), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- user_project_assignments ---
@@ -67,7 +51,7 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("user_id", UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
         sa.Column("project_id", UUID(as_uuid=True), sa.ForeignKey("projects.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("assigned_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("assigned_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.UniqueConstraint("user_id", "project_id", name="uq_user_project"),
     )
 
@@ -77,8 +61,8 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("project_id", UUID(as_uuid=True), sa.ForeignKey("projects.id", ondelete="CASCADE"), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- floors ---
@@ -87,8 +71,8 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("building_id", UUID(as_uuid=True), sa.ForeignKey("buildings.id", ondelete="CASCADE"), nullable=False),
         sa.Column("floor_number", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- flats ---
@@ -98,9 +82,9 @@ def upgrade() -> None:
         sa.Column("floor_id", UUID(as_uuid=True), sa.ForeignKey("floors.id", ondelete="CASCADE"), nullable=False),
         sa.Column("flat_number", sa.String(50), nullable=False),
         sa.Column("flat_type", sa.String(50), nullable=False),
-        sa.Column("inspection_status", inspection_status, default="NOT_STARTED", nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("inspection_status", sa.String(20), server_default="NOT_STARTED", nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- inspection_entries ---
@@ -111,13 +95,13 @@ def upgrade() -> None:
         sa.Column("room_label", sa.String(255), nullable=False),
         sa.Column("category", sa.String(100), nullable=False),
         sa.Column("item_name", sa.String(255), nullable=False),
-        sa.Column("status", entry_status, default="NA", nullable=False),
-        sa.Column("severity", severity_level, nullable=True),
+        sa.Column("status", sa.String(10), server_default="NA", nullable=False),  # PASS, FAIL, NA
+        sa.Column("severity", sa.String(20), nullable=True),  # CRITICAL, MAJOR, MINOR
         sa.Column("notes", sa.Text(), nullable=True),
-        sa.Column("snag_fix_status", snag_fix_status, default="OPEN", nullable=False),
+        sa.Column("snag_fix_status", sa.String(20), server_default="OPEN", nullable=False),  # OPEN, FIXED, VERIFIED
         sa.Column("inspector_id", UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- snag_images ---
@@ -127,8 +111,8 @@ def upgrade() -> None:
         sa.Column("inspection_entry_id", UUID(as_uuid=True), sa.ForeignKey("inspection_entries.id", ondelete="CASCADE"), nullable=False),
         sa.Column("minio_key", sa.String(500), nullable=False),
         sa.Column("original_filename", sa.String(255), nullable=True),
-        sa.Column("file_size_bytes", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("file_size_bytes", sa.BigInteger(), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- voice_notes ---
@@ -137,8 +121,8 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("inspection_entry_id", UUID(as_uuid=True), sa.ForeignKey("inspection_entries.id", ondelete="CASCADE"), nullable=False),
         sa.Column("minio_key", sa.String(500), nullable=False),
-        sa.Column("duration_ms", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("duration_ms", sa.BigInteger(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- inspection_videos ---
@@ -147,8 +131,8 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("inspection_entry_id", UUID(as_uuid=True), sa.ForeignKey("inspection_entries.id", ondelete="CASCADE"), nullable=False),
         sa.Column("minio_key", sa.String(500), nullable=False),
-        sa.Column("duration_ms", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("duration_ms", sa.BigInteger(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- video_frame_analyses ---
@@ -156,9 +140,9 @@ def upgrade() -> None:
         "video_frame_analyses",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("video_id", UUID(as_uuid=True), sa.ForeignKey("inspection_videos.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("timestamp_ms", sa.Integer(), nullable=False),
+        sa.Column("timestamp_ms", sa.BigInteger(), nullable=False),
         sa.Column("description", sa.Text(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- contractors ---
@@ -170,9 +154,9 @@ def upgrade() -> None:
         sa.Column("phone", sa.String(50), nullable=True),
         sa.Column("email", sa.String(255), nullable=True),
         sa.Column("specialty", sa.String(255), nullable=True),
-        sa.Column("is_active", sa.Boolean(), default=True, nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- snag_contractor_assignments ---
@@ -181,7 +165,7 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("inspection_entry_id", UUID(as_uuid=True), sa.ForeignKey("inspection_entries.id", ondelete="CASCADE"), nullable=False),
         sa.Column("contractor_id", UUID(as_uuid=True), sa.ForeignKey("contractors.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("assigned_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("assigned_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("due_date", sa.Date(), nullable=True),
         sa.Column("notes", sa.Text(), nullable=True),
         sa.UniqueConstraint("inspection_entry_id", "contractor_id", name="uq_snag_contractor"),
@@ -195,10 +179,10 @@ def upgrade() -> None:
         sa.Column("room_type", sa.String(100), nullable=False),
         sa.Column("category", sa.String(100), nullable=False),
         sa.Column("item_name", sa.String(255), nullable=False),
-        sa.Column("sort_order", sa.Integer(), default=0, nullable=False),
-        sa.Column("is_active", sa.Boolean(), default=True, nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("sort_order", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
     # --- flat_type_rooms ---
@@ -209,7 +193,7 @@ def upgrade() -> None:
         sa.Column("flat_type", sa.String(50), nullable=False),
         sa.Column("room_type", sa.String(100), nullable=False),
         sa.Column("label", sa.String(255), nullable=False),
-        sa.Column("sort_order", sa.Integer(), default=0, nullable=False),
+        sa.Column("sort_order", sa.Integer(), server_default="0", nullable=False),
     )
 
     # --- floor_plan_layouts ---
@@ -230,12 +214,12 @@ def upgrade() -> None:
         "notification_logs",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("recipient_type", sa.String(50), nullable=False),
-        sa.Column("recipient_id", sa.String(255), nullable=False),
-        sa.Column("channel", sa.String(50), nullable=False),
+        sa.Column("recipient_id", UUID(as_uuid=True), nullable=False),
+        sa.Column("channel", sa.String(50), nullable=False),  # EMAIL, SMS
         sa.Column("subject", sa.String(500), nullable=True),
         sa.Column("body", sa.Text(), nullable=False),
-        sa.Column("status", notification_status, default="PENDING", nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("status", sa.String(20), server_default="PENDING", nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
     )
 
@@ -258,11 +242,3 @@ def downgrade() -> None:
     op.drop_table("user_project_assignments")
     op.drop_table("projects")
     op.drop_table("users")
-
-    # Drop enum types
-    sa.Enum(name="notification_status").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="snag_fix_status").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="severity_level").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="entry_status").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="inspection_status").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="user_role").drop(op.get_bind(), checkfirst=True)

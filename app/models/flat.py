@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,10 +22,8 @@ class Flat(Base):
     flat_number: Mapped[str] = mapped_column(String(50), nullable=False)
     flat_type: Mapped[str] = mapped_column(String(50), nullable=False)
     inspection_status: Mapped[str] = mapped_column(
-        Enum("NOT_STARTED", "IN_PROGRESS", "COMPLETED", name="inspection_status"),
-        default="NOT_STARTED",
-        nullable=False,
-    )
+        String(20), default="NOT_STARTED", nullable=False
+    )  # NOT_STARTED, IN_PROGRESS, COMPLETED
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
