@@ -39,7 +39,7 @@ class SyncPushResponse(BaseModel):
 
 
 class SyncPullRequest(BaseModel):
-    last_synced_at: str  # ISO8601
+    last_synced_at: Any  # ISO8601 string or epoch number
 
 
 class SyncPullResponse(BaseModel):

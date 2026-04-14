@@ -39,13 +39,22 @@ async def sync_pull(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SyncPullResponse:
+    raw = body.last_synced_at
     try:
-        last_synced = datetime.fromisoformat(body.last_synced_at)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid ISO8601 timestamp for last_synced_at",
-        )
+        # Try ISO8601 string first
+        last_synced = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        # Try numeric epoch (seconds or milliseconds)
+        try:
+            epoch = float(raw)
+            if epoch > 1e12:  # milliseconds
+                epoch /= 1000
+            last_synced = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        except (ValueError, TypeError, OSError):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid timestamp for last_synced_at (expected ISO8601 or epoch)",
+            )
 
     # If naive, assume UTC
     if last_synced.tzinfo is None:
