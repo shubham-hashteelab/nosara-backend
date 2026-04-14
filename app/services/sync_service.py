@@ -68,6 +68,8 @@ class SyncService:
                         rejected.append(SyncRejection(id=op.entity_id, reason=f"{op.entity_type} not found"))
                         continue
                     for key, value in op.data.items():
+                        if key == "id":
+                            continue  # Never overwrite primary key
                         if hasattr(obj, key):
                             setattr(obj, key, value)
                     await db.flush()
