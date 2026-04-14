@@ -50,6 +50,19 @@ async def list_buildings(
     return [BuildingResponse(**await _enrich_building(b, db)) for b in buildings]
 
 
+@router.get("/buildings/{building_id}", response_model=BuildingResponse)
+async def get_building(
+    building_id: uuid.UUID,
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> BuildingResponse:
+    result = await db.execute(select(Building).where(Building.id == building_id))
+    building = result.scalars().first()
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
+    return BuildingResponse(**await _enrich_building(building, db))
+
+
 @router.post(
     "/projects/{project_id}/buildings",
     response_model=BuildingResponse,

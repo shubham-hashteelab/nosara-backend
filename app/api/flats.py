@@ -27,6 +27,19 @@ async def list_flats(
     return [FlatResponse.model_validate(f) for f in flats]
 
 
+@router.get("/flats/{flat_id}", response_model=FlatResponse)
+async def get_flat(
+    flat_id: uuid.UUID,
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> FlatResponse:
+    result = await db.execute(select(Flat).where(Flat.id == flat_id))
+    flat = result.scalars().first()
+    if not flat:
+        raise HTTPException(status_code=404, detail="Flat not found")
+    return FlatResponse.model_validate(flat)
+
+
 @router.post(
     "/floors/{floor_id}/flats",
     response_model=FlatResponse,
