@@ -255,6 +255,14 @@ async def seed_defaults(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Seed the default checklist templates, flat type rooms, and floor plan layouts."""
+    # Check if already seeded
+    existing = await db.execute(select(ChecklistTemplate).limit(1))
+    if existing.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Defaults already seeded. Delete existing data before re-seeding.",
+        )
+
     # Seed checklist templates
     for item in SEED_CHECKLIST_ITEMS:
         template = ChecklistTemplate(
