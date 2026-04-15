@@ -62,17 +62,19 @@ alembic/                 # DB migrations
   - `GET/POST /floors/{id}/flats`, `GET/PATCH/DELETE /flats/{id}`
 - **Inspections:**
   - `GET /flats/{id}/entries`, `GET/PATCH /entries/{id}`
-  - `POST /entries/{flatId}/initialize-checklist` — creates entries from templates
-- **Media:** `POST /files/upload`, `GET /files/{key}` (proxied to/from MinIO)
+  - `GET /flats/{id}/checklist-preview` — returns templates grouped by room for cherry-pick UI
+  - `POST /entries/{flatId}/initialize-checklist` — creates entries from templates. Accepts optional `{ template_ids: [...] }` body for cherry-picking. Returns 409 if entries already exist (idempotent guard).
+- **Media:** `POST /files/upload`, `GET /files/{key}?token=JWT` (proxied to/from MinIO, auth via query param for img/audio/video tags)
 - **AI:** `POST /ai/describe-snag` (proxied to vLLM)
-- **Sync:** `POST /sync/pull` (accepts ISO8601 or epoch), `POST /sync/push`
+- **Sync:** `POST /sync/pull` (accepts ISO8601 or epoch), `POST /sync/push`, `POST /sync/upload-file`
 - **Users:** CRUD + granular assignment:
   - `POST/DELETE /users/{id}/assign-project/{projectId}`
   - `POST/DELETE /users/{id}/assign-building/{buildingId}`
   - `POST/DELETE /users/{id}/assign-flat/{flatId}`
   - UserResponse includes `assigned_project_ids`, `assigned_building_ids`, `assigned_flat_ids`
 - **Seed:** `POST /seed-hierarchy` (5 Godrej projects + towers/floors/flats), `POST /checklist-templates/seed-defaults` (templates + rooms + floor plans). Both reject if already seeded.
-- **Checklists / Contractors / Dashboard:** Manager CRUD + analytics
+- **Dashboard:** `GET /dashboard/projects/{id}/stats` — returns flat-level status counts (`inspected_flats`, `in_progress_flats`, `not_started_flats`) from `Flat.inspection_status` column, plus snag severity/category breakdowns. Route paths use plural (`/projects/`, `/buildings/`).
+- **Checklists / Contractors:** Manager CRUD
 
 ## Granular Access Control
 
@@ -89,8 +91,8 @@ The scope resolver unions all three levels. Building-only assignments auto-inclu
 ## Sync Design (Android ↔ Backend)
 
 - **Pull:** `_resolve_scope()` computes accessible project/building/floor/flat IDs from all assignment levels. Returns only data within scope, filtered by `updated_at >= last_synced_at`. Always returns all `flat_type_rooms` and `floor_plan_layouts` (global, not time-filtered).
-- **Push:** Individual mutations from sync queue. `data` dict applied via `setattr` (skips `id` key). For `inspection_entry` CREATEs, `inspector_id` is auto-set.
-- Files uploaded one at a time through `POST /sync/upload-file`.
+- **Push:** Individual mutations from sync queue. `data` dict applied via `setattr` (skips `id` key). For `inspection_entry` CREATEs, `inspector_id` is auto-set. **CREATEs are idempotent** — if a record with the same ID already exists, it's accepted without inserting a duplicate.
+- **File upload:** `POST /sync/upload-file` accepts multipart with `file`, `type` (snag_image/voice_note/inspection_video), `inspection_entry_id`, `client_id`. Uploads to MinIO AND creates the DB record (SnagImage/VoiceNote/InspectionVideo) in one request. Returns `{ minio_key, size }`.
 - Computed response fields: `ProjectResponse` includes `total_buildings`, `total_flats`; `BuildingResponse` includes `total_floors`, `total_flats`; `FloorResponse` includes `total_flats`, `label`.
 
 ## RunPod Deployment
@@ -99,15 +101,17 @@ The scope resolver unions all three levels. Building-only assignments auto-inclu
 # SSH into pod
 ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519
 
-# Update and restart
+# Update and restart (use start.sh, not manual uvicorn)
 cd /root/nosara-backend && git pull
-alembic upgrade head          # Run any new migrations
-pkill -f uvicorn
-nohup /workspace/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 > /workspace/logs/uvicorn.log 2>&1 &
+lsof -ti :8000 | xargs kill -9    # Kill stale processes on port 8000
+find . -name '__pycache__' -exec rm -rf {} + 2>/dev/null  # Clear bytecode cache
+bash start.sh                       # Handles PostgreSQL, MinIO, migrations, uvicorn
 
 # Check logs
 tail -f /workspace/logs/uvicorn.log
 ```
+
+**Important:** Always use `bash start.sh` to restart — it handles PostgreSQL, MinIO, and uvicorn together. Manual `pkill uvicorn` can leave ghost processes; always check `lsof -i :8000` and kill stale PIDs before restarting. Clear `__pycache__` if code changes don't take effect after restart.
 
 ## Local Dev Commands
 
