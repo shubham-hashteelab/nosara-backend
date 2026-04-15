@@ -10,14 +10,17 @@ class ProjectStats(BaseModel):
     project_name: str
     total_buildings: int
     total_flats: int
-    total_entries: int
-    snag_count: int
-    ok_count: int
-    na_count: int
+    inspected_flats: int
+    in_progress_flats: int
+    not_started_flats: int
+    total_snags: int
     open_snags: int
-    in_progress_snags: int
     fixed_snags: int
     verified_snags: int
+    critical_snags: int
+    major_snags: int
+    minor_snags: int
+    snags_by_category: dict[str, int]
 
 
 class BuildingStats(BaseModel):

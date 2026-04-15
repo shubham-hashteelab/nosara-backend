@@ -24,7 +24,7 @@ from app.schemas.dashboard import (
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
-@router.get("/project/{project_id}/stats", response_model=ProjectStats)
+@router.get("/projects/{project_id}/stats", response_model=ProjectStats)
 async def project_stats(
     project_id: uuid.UUID,
     _user: Annotated[User, Depends(get_current_user)],
@@ -42,33 +42,34 @@ async def project_stats(
     )
     total_buildings = bld_count.scalar() or 0
 
-    # Count flats via join
-    flat_count = await db.execute(
-        select(func.count(Flat.id))
+    # Flat status counts (from inspection_status column)
+    flat_stats = await db.execute(
+        select(
+            func.count(Flat.id).label("total"),
+            func.count(
+                case((Flat.inspection_status == "COMPLETED", Flat.id))
+            ).label("completed"),
+            func.count(
+                case((Flat.inspection_status == "IN_PROGRESS", Flat.id))
+            ).label("in_progress"),
+            func.count(
+                case((Flat.inspection_status == "NOT_STARTED", Flat.id))
+            ).label("not_started"),
+        )
         .join(Floor, Floor.id == Flat.floor_id)
         .join(Building, Building.id == Floor.building_id)
         .where(Building.project_id == project_id)
     )
-    total_flats = flat_count.scalar() or 0
+    flat_row = flat_stats.one()
 
-    # Entry stats via join
-    entry_stats = await db.execute(
+    # Snag stats: fix status, severity, and category breakdown
+    snag_stats = await db.execute(
         select(
-            func.count(InspectionEntry.id).label("total"),
-            func.count(
-                case((InspectionEntry.status == "SNAG", InspectionEntry.id))
-            ).label("snag_count"),
-            func.count(
-                case((InspectionEntry.status == "OK", InspectionEntry.id))
-            ).label("ok_count"),
-            func.count(
-                case((InspectionEntry.status == "NA", InspectionEntry.id))
-            ).label("na_count"),
+            func.count(InspectionEntry.id).label("total_snags"),
             func.count(
                 case(
                     (
-                        (InspectionEntry.status == "SNAG")
-                        & (InspectionEntry.snag_fix_status == "OPEN"),
+                        InspectionEntry.snag_fix_status == "OPEN",
                         InspectionEntry.id,
                     )
                 )
@@ -76,17 +77,7 @@ async def project_stats(
             func.count(
                 case(
                     (
-                        (InspectionEntry.status == "SNAG")
-                        & (InspectionEntry.snag_fix_status == "IN_PROGRESS"),
-                        InspectionEntry.id,
-                    )
-                )
-            ).label("in_progress_snags"),
-            func.count(
-                case(
-                    (
-                        (InspectionEntry.status == "SNAG")
-                        & (InspectionEntry.snag_fix_status == "FIXED"),
+                        InspectionEntry.snag_fix_status == "FIXED",
                         InspectionEntry.id,
                     )
                 )
@@ -94,37 +85,70 @@ async def project_stats(
             func.count(
                 case(
                     (
-                        (InspectionEntry.status == "SNAG")
-                        & (InspectionEntry.snag_fix_status == "VERIFIED"),
+                        InspectionEntry.snag_fix_status == "VERIFIED",
                         InspectionEntry.id,
                     )
                 )
             ).label("verified_snags"),
+            func.count(
+                case((InspectionEntry.severity == "CRITICAL", InspectionEntry.id))
+            ).label("critical_snags"),
+            func.count(
+                case((InspectionEntry.severity == "MAJOR", InspectionEntry.id))
+            ).label("major_snags"),
+            func.count(
+                case((InspectionEntry.severity == "MINOR", InspectionEntry.id))
+            ).label("minor_snags"),
         )
         .join(Flat, Flat.id == InspectionEntry.flat_id)
         .join(Floor, Floor.id == Flat.floor_id)
         .join(Building, Building.id == Floor.building_id)
-        .where(Building.project_id == project_id)
+        .where(
+            Building.project_id == project_id,
+            InspectionEntry.status == "SNAG",
+        )
     )
-    row = entry_stats.one()
+    snag_row = snag_stats.one()
+
+    # Snags by category (room_label as category)
+    cat_result = await db.execute(
+        select(
+            InspectionEntry.room_label,
+            func.count(InspectionEntry.id),
+        )
+        .join(Flat, Flat.id == InspectionEntry.flat_id)
+        .join(Floor, Floor.id == Flat.floor_id)
+        .join(Building, Building.id == Floor.building_id)
+        .where(
+            Building.project_id == project_id,
+            InspectionEntry.status == "SNAG",
+        )
+        .group_by(InspectionEntry.room_label)
+    )
+    snags_by_category = {
+        row[0]: row[1] for row in cat_result.all() if row[0]
+    }
 
     return ProjectStats(
         project_id=project.id,
         project_name=project.name,
         total_buildings=total_buildings,
-        total_flats=total_flats,
-        total_entries=row.total,
-        snag_count=row.snag_count,
-        ok_count=row.ok_count,
-        na_count=row.na_count,
-        open_snags=row.open_snags,
-        in_progress_snags=row.in_progress_snags,
-        fixed_snags=row.fixed_snags,
-        verified_snags=row.verified_snags,
+        total_flats=flat_row.total,
+        inspected_flats=flat_row.completed,
+        in_progress_flats=flat_row.in_progress,
+        not_started_flats=flat_row.not_started,
+        total_snags=snag_row.total_snags,
+        open_snags=snag_row.open_snags,
+        fixed_snags=snag_row.fixed_snags,
+        verified_snags=snag_row.verified_snags,
+        critical_snags=snag_row.critical_snags,
+        major_snags=snag_row.major_snags,
+        minor_snags=snag_row.minor_snags,
+        snags_by_category=snags_by_category,
     )
 
 
-@router.get("/building/{building_id}/stats", response_model=BuildingStats)
+@router.get("/buildings/{building_id}/stats", response_model=BuildingStats)
 async def building_stats(
     building_id: uuid.UUID,
     _user: Annotated[User, Depends(get_current_user)],
