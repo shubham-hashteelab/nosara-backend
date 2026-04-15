@@ -17,6 +17,7 @@ from app.models.project import Project
 from app.models.user import UserProjectAssignment, UserBuildingAssignment, UserFlatAssignment
 from app.schemas.sync import SyncOperation, SyncRejection
 from app.services.event_service import event_service
+from app.services.inspection_service import recompute_flat_inspection_status
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,12 @@ class SyncService:
                         if hasattr(obj, key):
                             setattr(obj, key, value)
                     await db.flush()
+
+                    # Recompute flat status when an entry's check status changes
+                    if op.entity_type == "inspection_entry" and "status" in op.data:
+                        await recompute_flat_inspection_status(obj.flat_id, db)
+                        await db.flush()
+
                     accepted.append(str(op.entity_id))
 
                 elif op.operation == "DELETE":

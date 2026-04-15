@@ -17,6 +17,7 @@ from app.schemas.inspection import (
     InspectionEntryResponse,
     InspectionEntryUpdate,
 )
+from app.services.inspection_service import recompute_flat_inspection_status
 
 router = APIRouter(tags=["inspections"])
 
@@ -126,6 +127,10 @@ async def update_entry(
         if value is not None:
             setattr(entry, field, value)
 
+    await db.commit()
+
+    # Recompute flat inspection status after entry update
+    await recompute_flat_inspection_status(entry.flat_id, db)
     await db.commit()
 
     # Reload with relationships
@@ -289,8 +294,8 @@ async def initialize_checklist(
         )
         created_entries = list(result.scalars().all())
 
-    # Update flat status
-    flat.inspection_status = "IN_PROGRESS"
+    # Recompute flat status from entries (all NA at this point → NOT_STARTED)
+    await recompute_flat_inspection_status(flat.id, db)
     await db.commit()
 
     return [InspectionEntryResponse.model_validate(e) for e in created_entries]
