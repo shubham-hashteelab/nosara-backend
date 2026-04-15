@@ -2,7 +2,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -215,6 +215,16 @@ async def initialize_checklist(
     flat = flat_result.scalars().first()
     if not flat:
         raise HTTPException(status_code=404, detail="Flat not found")
+
+    # Guard: prevent double initialization
+    existing_count = await db.execute(
+        select(func.count(InspectionEntry.id)).where(InspectionEntry.flat_id == flat_id)
+    )
+    if (existing_count.scalar() or 0) > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Checklist already initialized for this flat. Delete existing entries first.",
+        )
 
     selected_ids = set(body.template_ids) if body and body.template_ids else None
 
