@@ -94,9 +94,22 @@ async def upload_file(
 @router.get("/{minio_key:path}")
 async def get_file(
     minio_key: str,
-    _user: Annotated[User, Depends(get_current_user)],
+    token: str | None = None,
 ) -> Response:
-    """Proxy file download from MinIO."""
+    """
+    Proxy file download from MinIO.
+    Accepts ?token= query param for auth (needed for <img src> and <audio src>).
+    """
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required (pass ?token=)")
+
+    from app.services.auth_service import decode_token
+    from jose import JWTError
+    try:
+        decode_token(token)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
     try:
         file_bytes, content_type = minio_service.get_object(minio_key)
     except Exception:
