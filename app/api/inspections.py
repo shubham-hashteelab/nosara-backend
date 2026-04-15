@@ -12,6 +12,7 @@ from app.models.flat import Flat
 from app.models.inspection import InspectionEntry
 from app.models.user import User
 from app.schemas.inspection import (
+    InitializeChecklistRequest,
     InspectionEntryCreate,
     InspectionEntryResponse,
     InspectionEntryUpdate,
@@ -141,6 +142,56 @@ async def update_entry(
     return InspectionEntryResponse.model_validate(entry)
 
 
+@router.get("/flats/{flat_id}/checklist-preview")
+async def checklist_preview(
+    flat_id: uuid.UUID,
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[dict]:
+    """
+    Returns all checklist templates grouped by room for the flat's type.
+    Used by the portal to let the manager cherry-pick items before initializing.
+    """
+    flat_result = await db.execute(select(Flat).where(Flat.id == flat_id))
+    flat = flat_result.scalars().first()
+    if not flat:
+        raise HTTPException(status_code=404, detail="Flat not found")
+
+    rooms_result = await db.execute(
+        select(FlatTypeRoom)
+        .where(FlatTypeRoom.flat_type == flat.flat_type)
+        .order_by(FlatTypeRoom.sort_order)
+    )
+    rooms = rooms_result.scalars().all()
+
+    preview: list[dict] = []
+    for room in rooms:
+        templates_result = await db.execute(
+            select(ChecklistTemplate)
+            .where(
+                ChecklistTemplate.room_type == room.room_type,
+                ChecklistTemplate.is_active == True,  # noqa: E712
+            )
+            .order_by(ChecklistTemplate.sort_order)
+        )
+        templates = templates_result.scalars().all()
+        preview.append({
+            "room_label": room.label,
+            "room_type": room.room_type,
+            "items": [
+                {
+                    "template_id": str(t.id),
+                    "category": t.category,
+                    "item_name": t.item_name,
+                    "sort_order": t.sort_order,
+                }
+                for t in templates
+            ],
+        })
+
+    return preview
+
+
 @router.post(
     "/entries/{entry_id}/initialize-checklist",
     response_model=list[InspectionEntryResponse],
@@ -150,18 +201,22 @@ async def initialize_checklist(
     entry_id: uuid.UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    body: InitializeChecklistRequest | None = None,
 ) -> list[InspectionEntryResponse]:
     """
     Create inspection entries from checklist templates for the flat's type.
     entry_id here is actually the flat_id — the endpoint creates entries for the flat.
-    We use the flat to determine flat_type, look up rooms for that type, then
-    create entries from matching checklist templates.
+
+    If body.template_ids is provided, only creates entries for those specific
+    templates (cherry-pick). Otherwise creates entries for all active templates.
     """
     flat_id = entry_id  # Reinterpret: the path param is the flat_id
     flat_result = await db.execute(select(Flat).where(Flat.id == flat_id))
     flat = flat_result.scalars().first()
     if not flat:
         raise HTTPException(status_code=404, detail="Flat not found")
+
+    selected_ids = set(body.template_ids) if body and body.template_ids else None
 
     # Get rooms for this flat type
     rooms_result = await db.execute(
@@ -192,6 +247,10 @@ async def initialize_checklist(
         templates = templates_result.scalars().all()
 
         for template in templates:
+            # If cherry-picking, skip templates not in the selected set
+            if selected_ids is not None and template.id not in selected_ids:
+                continue
+
             entry = InspectionEntry(
                 flat_id=flat.id,
                 room_label=room.label,
