@@ -47,7 +47,8 @@ app/
 │   ├── checklists.py    # Template CRUD + seed-defaults + seed-hierarchy
 │   └── sync.py          # Pull/push sync, accepts ISO8601 or epoch timestamps
 └── services/            # Business logic (auth, minio, ai, sync, reports)
-    └── sync_service.py  # Scope resolver for granular access, push/pull processing
+    ├── sync_service.py  # Scope resolver for granular access, push/pull processing
+    └── inspection_service.py  # recompute_flat_inspection_status (entry-count-based status)
 alembic/                 # DB migrations
 ```
 
@@ -94,6 +95,23 @@ The scope resolver unions all three levels. Building-only assignments auto-inclu
 - **Push:** Individual mutations from sync queue. `data` dict applied via `setattr` (skips `id` key). For `inspection_entry` CREATEs, `inspector_id` is auto-set. **CREATEs are idempotent** — if a record with the same ID already exists, it's accepted without inserting a duplicate.
 - **File upload:** `POST /sync/upload-file` accepts multipart with `file`, `type` (snag_image/voice_note/inspection_video), `inspection_entry_id`, `client_id`. Uploads to MinIO AND creates the DB record (SnagImage/VoiceNote/InspectionVideo) in one request. Returns `{ minio_key, size }`.
 - Computed response fields: `ProjectResponse` includes `total_buildings`, `total_flats`; `BuildingResponse` includes `total_floors`, `total_flats`; `FloorResponse` includes `total_flats`, `label`.
+
+## Flat Inspection Status
+
+`Flat.inspection_status` is a stored column recomputed from entry counts by `recompute_flat_inspection_status()` in `app/services/inspection_service.py`:
+
+| Status | Rule |
+|---|---|
+| `NOT_STARTED` | No entries exist, or all entries have `status = 'NA'` |
+| `IN_PROGRESS` | At least one entry has `status != 'NA'`, but not all |
+| `COMPLETED` | All entries have `status != 'NA'` (and at least one entry exists) |
+
+The helper is called automatically after every mutation that can change the status:
+- `POST /entries/{flatId}/initialize-checklist` (all entries start as NA → NOT_STARTED)
+- `PATCH /entries/{id}` when entry status changes
+- Sync push when an `inspection_entry` UPDATE includes a `status` field
+
+`PATCH /flats/{id}` still allows managers to manually override `inspection_status` (bypasses recompute). Dashboard reads the stored column directly.
 
 ## RunPod Deployment
 
