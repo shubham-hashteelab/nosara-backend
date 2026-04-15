@@ -53,6 +53,12 @@ class SyncService:
                     continue
 
                 if op.operation == "CREATE":
+                    # Check if record already exists (idempotent — don't create duplicates)
+                    existing = await db.execute(select(model).where(model.id == op.entity_id))
+                    if existing.scalars().first() is not None:
+                        accepted.append(str(op.entity_id))
+                        continue
+
                     data = dict(op.data)
                     data["id"] = op.entity_id
                     if op.entity_type == "inspection_entry":
