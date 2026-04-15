@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import async_session_factory
 from app.services.auth_service import create_default_manager
+from app.services.event_service import event_service
 from app.services.minio_service import minio_service
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,17 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     except Exception as exc:
         logger.warning("Could not ensure MinIO bucket (service may be unavailable): %s", exc)
 
+    # Start PG LISTEN for SSE broadcasting
+    try:
+        await event_service.start_listener()
+        logger.info("SSE event listener started.")
+    except Exception as exc:
+        logger.warning("Could not start event listener: %s", exc)
+
     yield
 
     # Shutdown
+    await event_service.stop_listener()
     logger.info("Shutting down Nosara backend...")
 
 
@@ -66,6 +75,7 @@ from app.api.contractors import router as contractors_router  # noqa: E402
 from app.api.checklists import router as checklists_router  # noqa: E402
 from app.api.dashboard import router as dashboard_router  # noqa: E402
 from app.api.sync import router as sync_router  # noqa: E402
+from app.api.events import router as events_router  # noqa: E402
 
 API_PREFIX = "/api/v1"
 
@@ -82,6 +92,7 @@ app.include_router(contractors_router, prefix=API_PREFIX)
 app.include_router(checklists_router, prefix=API_PREFIX)
 app.include_router(dashboard_router, prefix=API_PREFIX)
 app.include_router(sync_router, prefix=API_PREFIX)
+app.include_router(events_router, prefix=API_PREFIX)
 
 
 @app.get(f"{API_PREFIX}/health")

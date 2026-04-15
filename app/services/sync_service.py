@@ -16,6 +16,7 @@ from app.models.inspection import InspectionEntry
 from app.models.project import Project
 from app.models.user import UserProjectAssignment, UserBuildingAssignment, UserFlatAssignment
 from app.schemas.sync import SyncOperation, SyncRejection
+from app.services.event_service import event_service
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,20 @@ class SyncService:
                 rejected.append(SyncRejection(id=op.entity_id, reason=str(exc)))
 
         await db.commit()
+
+        # Notify SSE clients about the sync push
+        if accepted:
+            entity_types = list({op.entity_type for op in operations})
+            try:
+                await event_service.notify({
+                    "event_type": "sync_push_completed",
+                    "inspector_id": str(inspector_id),
+                    "entity_types": entity_types,
+                    "accepted_count": len(accepted),
+                })
+            except Exception:
+                logger.exception("Failed to notify after sync push")
+
         return accepted, rejected
 
     async def _resolve_scope(

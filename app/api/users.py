@@ -1,3 +1,4 @@
+import logging
 import uuid
 from typing import Annotated
 
@@ -13,8 +14,27 @@ from app.models.building import Building
 from app.models.flat import Flat
 from app.schemas.auth import UserCreate, UserResponse, UserUpdate
 from app.services.auth_service import hash_password
+from app.services.event_service import event_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+async def _notify_assignment_changed(
+    user_id: uuid.UUID, action: str, level: str, entity_id: uuid.UUID,
+) -> None:
+    """Best-effort SSE notification for assignment changes."""
+    try:
+        await event_service.notify({
+            "event_type": "assignment_changed",
+            "user_id": str(user_id),
+            "action": action,
+            "level": level,
+            "entity_id": str(entity_id),
+        })
+    except Exception:
+        logger.exception("Failed to notify assignment change")
 
 
 def _user_to_response(user: User) -> UserResponse:
@@ -172,6 +192,7 @@ async def assign_project(
     assignment = UserProjectAssignment(user_id=user_id, project_id=project_id)
     db.add(assignment)
     await db.commit()
+    await _notify_assignment_changed(user_id, "assigned", "project", project_id)
     return {"detail": "Project assigned"}
 
 
@@ -194,6 +215,7 @@ async def unassign_project(
 
     await db.delete(assignment)
     await db.commit()
+    await _notify_assignment_changed(user_id, "unassigned", "project", project_id)
     return {"detail": "Project unassigned"}
 
 
@@ -234,6 +256,7 @@ async def assign_building(
     assignment = UserBuildingAssignment(user_id=user_id, building_id=building_id)
     db.add(assignment)
     await db.commit()
+    await _notify_assignment_changed(user_id, "assigned", "building", building_id)
     return {"detail": "Building assigned"}
 
 
@@ -256,6 +279,7 @@ async def unassign_building(
 
     await db.delete(assignment)
     await db.commit()
+    await _notify_assignment_changed(user_id, "unassigned", "building", building_id)
     return {"detail": "Building unassigned"}
 
 
@@ -296,6 +320,7 @@ async def assign_flat(
     assignment = UserFlatAssignment(user_id=user_id, flat_id=flat_id)
     db.add(assignment)
     await db.commit()
+    await _notify_assignment_changed(user_id, "assigned", "flat", flat_id)
     return {"detail": "Flat assigned"}
 
 
@@ -318,4 +343,5 @@ async def unassign_flat(
 
     await db.delete(assignment)
     await db.commit()
+    await _notify_assignment_changed(user_id, "unassigned", "flat", flat_id)
     return {"detail": "Flat unassigned"}
