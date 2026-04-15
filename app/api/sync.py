@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.models.inspection import SnagImage, VoiceNote, InspectionVideo
 from app.models.user import User
 from app.schemas.sync import (
     SyncPullRequest,
@@ -71,14 +72,72 @@ async def sync_pull(
 @router.post("/upload-file", status_code=status.HTTP_201_CREATED)
 async def sync_upload_file(
     file: Annotated[UploadFile, File()],
-    minio_key: Annotated[str, Form()],
+    type: Annotated[str, Form()],
+    inspection_entry_id: Annotated[str, Form()],
+    client_id: Annotated[str, Form()],
     _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """
-    Upload a file during sync. The client specifies the desired minio_key.
-    This is used for offline-created files that need to be pushed to storage.
+    Upload a media file during sync and create the corresponding DB record.
+    Called by the Android app for images, voice notes, and videos that were
+    captured offline and need to be pushed to the server.
+
+    - type: "snag_image", "voice_note", or "inspection_video"
+    - inspection_entry_id: UUID of the parent inspection entry
+    - client_id: UUID generated client-side (used as the DB record ID)
     """
+    entry_uuid = uuid.UUID(inspection_entry_id)
+    record_id = uuid.UUID(client_id)
+
     file_bytes = await file.read()
     content_type = file.content_type or "application/octet-stream"
+    file_ext = ""
+    if file.filename:
+        file_ext = "." + file.filename.rsplit(".", 1)[-1] if "." in file.filename else ""
+
+    # Generate MinIO key matching the online upload convention
+    type_folder = {
+        "snag_image": "images",
+        "voice_note": "voices",
+        "inspection_video": "videos",
+    }.get(type, "files")
+    minio_key = f"{type_folder}/{inspection_entry_id}/{uuid.uuid4()}{file_ext}"
+
     minio_service.upload_file(file_bytes, minio_key, content_type)
+
+    # Create the DB record linking the file to the inspection entry
+    if type == "snag_image":
+        record = SnagImage(
+            id=record_id,
+            inspection_entry_id=entry_uuid,
+            minio_key=minio_key,
+            original_filename=file.filename,
+            file_size_bytes=len(file_bytes),
+        )
+        db.add(record)
+    elif type == "voice_note":
+        record = VoiceNote(
+            id=record_id,
+            inspection_entry_id=entry_uuid,
+            minio_key=minio_key,
+            duration_ms=0,  # App should update this via sync push if needed
+        )
+        db.add(record)
+    elif type == "inspection_video":
+        record = InspectionVideo(
+            id=record_id,
+            inspection_entry_id=entry_uuid,
+            minio_key=minio_key,
+            duration_ms=0,
+        )
+        db.add(record)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown media type: {type}. Expected: snag_image, voice_note, inspection_video",
+        )
+
+    await db.commit()
+
     return {"minio_key": minio_key, "size": len(file_bytes)}
