@@ -322,6 +322,13 @@ class SyncService:
 
         server_time = datetime.now(timezone.utc).isoformat()
 
+        scope_snapshot = {
+            "project_ids": [str(x) for x in project_ids],
+            "building_ids": [str(x) for x in building_ids],
+            "floor_ids": [str(x) for x in floor_ids],
+            "flat_ids": [str(x) for x in flat_ids],
+        }
+
         return {
             "projects": projects,
             "buildings": buildings,
@@ -333,6 +340,7 @@ class SyncService:
             "flat_type_rooms": flat_type_rooms,
             "floor_plan_layouts": floor_plan_layouts,
             "deleted_ids": [],
+            "scope_snapshot": scope_snapshot,
             "server_time": server_time,
         }
 

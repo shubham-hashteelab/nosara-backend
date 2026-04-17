@@ -16,6 +16,19 @@ from app.schemas.inspection import InspectionEntryResponse
 from app.schemas.project import ProjectResponse
 
 
+class ScopeSnapshot(BaseModel):
+    """Authoritative set of IDs the authenticated user is entitled to.
+
+    Clients diff this against local rows and prune anything absent.
+    Returned on every /sync/pull so revocation propagates without a full reset.
+    """
+
+    project_ids: list[str] = []
+    building_ids: list[str] = []
+    floor_ids: list[str] = []
+    flat_ids: list[str] = []
+
+
 class SyncOperation(BaseModel):
     entity_type: str
     entity_id: uuid.UUID
@@ -53,4 +66,5 @@ class SyncPullResponse(BaseModel):
     flat_type_rooms: list[FlatTypeRoomResponse] = []
     floor_plan_layouts: list[FloorPlanLayoutResponse] = []
     deleted_ids: list[uuid.UUID] = []
+    scope_snapshot: ScopeSnapshot = ScopeSnapshot()
     server_time: str  # ISO8601
