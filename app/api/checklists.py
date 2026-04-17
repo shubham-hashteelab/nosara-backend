@@ -23,6 +23,10 @@ from app.schemas.checklist import (
     FloorPlanLayoutResponse,
     FloorPlanLayoutUpdate,
 )
+from app.services.inspection_service import (
+    initialize_flat_checklist,
+    recompute_flat_inspection_status,
+)
 
 router = APIRouter(tags=["checklists"])
 
@@ -354,6 +358,9 @@ async def seed_hierarchy(
                         flat_type=flat_def["type"],
                     )
                     db.add(flat)
+                    await db.flush()  # assign flat.id before init
+                    await initialize_flat_checklist(flat.id, db)
+                    await recompute_flat_inspection_status(flat.id, db)
                     flat_count += 1
 
     await db.commit()

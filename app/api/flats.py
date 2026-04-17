@@ -10,6 +10,10 @@ from app.models.flat import Flat
 from app.models.floor import Floor
 from app.models.user import User
 from app.schemas.flat import FlatCreate, FlatResponse, FlatUpdate
+from app.services.inspection_service import (
+    initialize_flat_checklist,
+    recompute_flat_inspection_status,
+)
 
 router = APIRouter(tags=["flats"])
 
@@ -61,6 +65,14 @@ async def create_flat(
         flat_type=body.flat_type,
     )
     db.add(flat)
+    await db.flush()  # assign flat.id before initializing checklist
+
+    # Auto-initialize inspection entries from this flat_type's templates.
+    # Idempotent: no-op if no templates exist for the type (e.g., portal
+    # creates a flat of a brand-new flat_type before Blueprints are defined).
+    await initialize_flat_checklist(flat.id, db)
+    await recompute_flat_inspection_status(flat.id, db)
+
     await db.commit()
     await db.refresh(flat)
     return FlatResponse.model_validate(flat)

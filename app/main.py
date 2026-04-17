@@ -8,6 +8,7 @@ from app.config import settings
 from app.database import async_session_factory
 from app.services.auth_service import create_default_manager
 from app.services.event_service import event_service
+from app.services.inspection_service import backfill_uninitialized_flats
 from app.services.minio_service import minio_service
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,14 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         logger.info("SSE event listener started.")
     except Exception as exc:
         logger.warning("Could not start event listener: %s", exc)
+
+    # Backfill inspection entries for any flat that has none. Covers flats
+    # created before auto-init-on-create shipped.
+    try:
+        async with async_session_factory() as db:
+            await backfill_uninitialized_flats(db)
+    except Exception as exc:
+        logger.warning("Checklist backfill skipped: %s", exc)
 
     yield
 

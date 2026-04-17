@@ -48,7 +48,7 @@ app/
 │   └── sync.py          # Pull/push sync, accepts ISO8601 or epoch timestamps
 └── services/            # Business logic (auth, minio, ai, sync, reports)
     ├── sync_service.py  # Scope resolver for granular access, push/pull processing
-    └── inspection_service.py  # recompute_flat_inspection_status (entry-count-based status)
+    └── inspection_service.py  # recompute_flat_inspection_status, initialize_flat_checklist, backfill_uninitialized_flats
 alembic/                 # DB migrations
 ```
 
@@ -63,8 +63,7 @@ alembic/                 # DB migrations
   - `GET/POST /floors/{id}/flats`, `GET/PATCH/DELETE /flats/{id}`
 - **Inspections:**
   - `GET /flats/{id}/entries`, `GET/PATCH /entries/{id}`
-  - `GET /flats/{id}/checklist-preview` — returns templates grouped by room for cherry-pick UI
-  - `POST /entries/{flatId}/initialize-checklist` — creates entries from templates. Accepts optional `{ template_ids: [...] }` body for cherry-picking. Returns 409 if entries already exist (idempotent guard).
+  - `POST /entries/{flatId}/initialize-checklist` — legacy idempotent fallback. Flats now auto-initialize on creation, so this endpoint is rarely called. Returns existing entries if already initialized, otherwise instantiates from templates.
 - **Media:** `POST /files/upload`, `GET /files/{key}?token=JWT` (proxied to/from MinIO, auth via query param for img/audio/video tags)
 - **AI:** `POST /ai/describe-snag` (proxied to vLLM)
 - **Sync:** `POST /sync/pull` (accepts ISO8601 or epoch), `POST /sync/push`, `POST /sync/upload-file`
@@ -102,6 +101,15 @@ The scope resolver unions all three levels. Building-only assignments auto-inclu
 - **Push:** Individual mutations from sync queue. `data` dict applied via `setattr` (skips `id` key). For `inspection_entry` CREATEs, `inspector_id` is auto-set. **CREATEs are idempotent** — if a record with the same ID already exists, it's accepted without inserting a duplicate.
 - **File upload:** `POST /sync/upload-file` accepts multipart with `file`, `type` (snag_image/voice_note/inspection_video), `inspection_entry_id`, `client_id`. Uploads to MinIO AND creates the DB record (SnagImage/VoiceNote/InspectionVideo) in one request. Returns `{ minio_key, size }`.
 - Computed response fields: `ProjectResponse` includes `total_buildings`, `total_flats`; `BuildingResponse` includes `total_floors`, `total_flats`; `FloorResponse` includes `total_flats`, `label`.
+
+## Checklist Auto-Initialization
+
+Inspection entries are created automatically from checklist templates whenever a flat is created — managers no longer run a manual "Initialize Checklist" step.
+
+- **On flat create** (`POST /floors/{id}/flats`) and **in seed-hierarchy**: `initialize_flat_checklist(flat.id, db)` runs after the flat row is flushed. It reads the flat's `flat_type`, finds the matching `FlatTypeRoom` rows, and for each room creates one `InspectionEntry` per active `ChecklistTemplate` matching that `room_type`. All entries start with `status="NA"` and `inspector_id=None` — the inspector id is set later when the actual inspector updates the entry via sync.
+- **On startup** (`main.py` lifespan): `backfill_uninitialized_flats(db)` finds every flat with zero entries and initializes it. Idempotent and safe to run every boot. Covers flats created before this feature shipped and flats whose flat_type had no rooms/templates at create time but does now.
+- **Legacy endpoint** (`POST /entries/{flatId}/initialize-checklist`) still exists but is now idempotent — it returns existing entries rather than 409'ing. The cherry-pick `template_ids` body is gone (portal no longer sends it). The companion `GET /flats/{id}/checklist-preview` endpoint was removed.
+- `inspection_service.initialize_flat_checklist` is a no-op if the flat already has any entry — callers don't need to guard.
 
 ## Flat Inspection Status
 

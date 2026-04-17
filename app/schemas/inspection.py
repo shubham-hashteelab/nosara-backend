@@ -5,10 +5,6 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict
 
 
-class InitializeChecklistRequest(BaseModel):
-    template_ids: Optional[list[uuid.UUID]] = None
-
-
 class InspectionEntryCreate(BaseModel):
     room_label: str
     category: str
