@@ -145,10 +145,7 @@ SEED_FLOOR_PLAN_LAYOUTS: list[dict] = [
 
 SEED_PROJECTS: list[dict] = [
     {"name": "Godrej Aria", "location": "Sector 79, Gurugram", "towers": 12},
-    {"name": "Godrej Meridien", "location": "Sector 106, Gurugram", "towers": 15},
     {"name": "Godrej Woods", "location": "Sector 43, Noida", "towers": 10},
-    {"name": "Godrej Nurture", "location": "Sector 150, Noida", "towers": 18},
-    {"name": "Godrej Summit", "location": "Sector 104, Gurugram", "towers": 14},
 ]
 
 FLOORS_PER_BUILDING = 10
