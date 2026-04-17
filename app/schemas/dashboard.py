@@ -123,3 +123,66 @@ class ProjectOverview(BaseModel):
 
 class ProjectsOverviewResponse(BaseModel):
     projects: list[ProjectOverview]
+
+
+class InspectorRef(BaseModel):
+    """An inspector with the scope level at which they hold access."""
+
+    id: uuid.UUID
+    full_name: str
+    username: str
+    source: str  # "PROJECT" | "BUILDING" | "FLAT"
+
+
+class FlatCoverage(BaseModel):
+    flat_id: uuid.UUID
+    flat_number: str
+    flat_type: str
+    inspection_status: str
+    assigned_inspectors: list[InspectorRef]
+
+
+class FloorCoverage(BaseModel):
+    floor_id: uuid.UUID
+    floor_number: int
+    label: str
+    total_flats: int
+    covered_flats: int
+    unassigned_flats: int
+    flats: list[FlatCoverage]
+
+
+class BuildingCoverage(BaseModel):
+    building_id: uuid.UUID
+    building_name: str
+    total_flats: int
+    covered_flats: int
+    unassigned_flats: int
+    building_inspectors: list[InspectorRef]
+    floors: list[FloorCoverage]
+
+
+class AssignmentCoverageResponse(BaseModel):
+    """Per-flat inspector coverage for a project.
+
+    `covered_flats` = flats with ≥1 inspector via project-, building-, or
+    flat-level assignment. `unassigned_flats` = total_flats - covered_flats.
+    """
+
+    project_id: uuid.UUID
+    project_name: str
+    total_flats: int
+    covered_flats: int
+    unassigned_flats: int
+    project_inspectors: list[InspectorRef]
+    buildings: list[BuildingCoverage]
+
+
+class UsersSummary(BaseModel):
+    """Top-of-page rollup for the Users admin page."""
+
+    total_users: int
+    total_managers: int
+    total_inspectors: int
+    idle_inspectors: int
+    total_unassigned_flats: int

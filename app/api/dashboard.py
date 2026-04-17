@@ -6,17 +6,27 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_db, require_manager
 from app.models.building import Building
 from app.models.flat import Flat
 from app.models.floor import Floor
 from app.models.inspection import InspectionEntry
 from app.models.project import Project
-from app.models.user import User
+from app.models.user import (
+    User,
+    UserBuildingAssignment,
+    UserFlatAssignment,
+    UserProjectAssignment,
+)
 from app.schemas.dashboard import (
+    AssignmentCoverageResponse,
+    BuildingCoverage,
     BuildingStats,
+    FlatCoverage,
+    FloorCoverage,
     FloorProgress,
     InspectorActivity,
+    InspectorRef,
     ProjectBuildingStats,
     ProjectOverview,
     ProjectStats,
@@ -24,6 +34,7 @@ from app.schemas.dashboard import (
     TowerMini,
     TowerProgress,
     TowerStatsResponse,
+    UsersSummary,
 )
 
 
@@ -613,3 +624,313 @@ async def projects_overview(
         )
 
     return ProjectsOverviewResponse(projects=projects)
+
+
+@router.get(
+    "/projects/{project_id}/assignment-coverage",
+    response_model=AssignmentCoverageResponse,
+)
+async def assignment_coverage(
+    project_id: uuid.UUID,
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AssignmentCoverageResponse:
+    """Per-flat inspector coverage for a project.
+
+    Returns the full project hierarchy (buildings → floors → flats) with the
+    list of inspectors assigned to each flat, either directly or inherited
+    via a building- or project-level assignment. Lets the portal show
+    unassigned-flat badges and drive the `By Project` coverage view.
+    """
+    proj_result = await db.execute(select(Project).where(Project.id == project_id))
+    project = proj_result.scalars().first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Full hierarchy in one query, ordered so we can build nested structures
+    # without hash lookups per row.
+    hierarchy_rows = (
+        await db.execute(
+            select(
+                Building.id.label("building_id"),
+                Building.name.label("building_name"),
+                Floor.id.label("floor_id"),
+                Floor.floor_number.label("floor_number"),
+                Flat.id.label("flat_id"),
+                Flat.flat_number.label("flat_number"),
+                Flat.flat_type.label("flat_type"),
+                Flat.inspection_status.label("inspection_status"),
+            )
+            .outerjoin(Floor, Floor.building_id == Building.id)
+            .outerjoin(Flat, Flat.floor_id == Floor.id)
+            .where(Building.project_id == project_id)
+            .order_by(Building.name, Floor.floor_number, Flat.flat_number)
+        )
+    ).all()
+
+    # Project-level inspectors (inherit to every flat in the project).
+    project_insp_rows = (
+        await db.execute(
+            select(User.id, User.full_name, User.username)
+            .join(UserProjectAssignment, UserProjectAssignment.user_id == User.id)
+            .where(UserProjectAssignment.project_id == project_id)
+            .order_by(User.full_name)
+        )
+    ).all()
+    project_inspectors = [
+        InspectorRef(
+            id=r.id, full_name=r.full_name, username=r.username, source="PROJECT"
+        )
+        for r in project_insp_rows
+    ]
+
+    # Building-level inspectors (inherit to every flat in the building).
+    bld_insp_rows = (
+        await db.execute(
+            select(
+                UserBuildingAssignment.building_id,
+                User.id,
+                User.full_name,
+                User.username,
+            )
+            .join(User, User.id == UserBuildingAssignment.user_id)
+            .join(Building, Building.id == UserBuildingAssignment.building_id)
+            .where(Building.project_id == project_id)
+            .order_by(User.full_name)
+        )
+    ).all()
+    inspectors_by_building: dict[uuid.UUID, list[InspectorRef]] = {}
+    for r in bld_insp_rows:
+        inspectors_by_building.setdefault(r.building_id, []).append(
+            InspectorRef(
+                id=r.id, full_name=r.full_name, username=r.username, source="BUILDING"
+            )
+        )
+
+    # Flat-level inspectors.
+    flat_insp_rows = (
+        await db.execute(
+            select(
+                UserFlatAssignment.flat_id,
+                User.id,
+                User.full_name,
+                User.username,
+            )
+            .join(User, User.id == UserFlatAssignment.user_id)
+            .join(Flat, Flat.id == UserFlatAssignment.flat_id)
+            .join(Floor, Floor.id == Flat.floor_id)
+            .join(Building, Building.id == Floor.building_id)
+            .where(Building.project_id == project_id)
+            .order_by(User.full_name)
+        )
+    ).all()
+    inspectors_by_flat: dict[uuid.UUID, list[InspectorRef]] = {}
+    for r in flat_insp_rows:
+        inspectors_by_flat.setdefault(r.flat_id, []).append(
+            InspectorRef(
+                id=r.id, full_name=r.full_name, username=r.username, source="FLAT"
+            )
+        )
+
+    # Build nested structure. We preserve ordering from the SQL ORDER BY so
+    # the portal can render deterministically.
+    buildings: list[BuildingCoverage] = []
+    current_bld: dict | None = None
+    current_floor: dict | None = None
+
+    def finalize_floor(floor: dict, bld: dict) -> None:
+        covered_flats = sum(
+            1 for f in floor["flats"] if f.assigned_inspectors
+        )
+        bld["floors"].append(
+            FloorCoverage(
+                floor_id=floor["floor_id"],
+                floor_number=floor["floor_number"],
+                label=f"Floor {floor['floor_number']}",
+                total_flats=len(floor["flats"]),
+                covered_flats=covered_flats,
+                unassigned_flats=len(floor["flats"]) - covered_flats,
+                flats=floor["flats"],
+            )
+        )
+
+    def finalize_building(bld: dict) -> None:
+        total = sum(f.total_flats for f in bld["floors"])
+        covered = sum(f.covered_flats for f in bld["floors"])
+        buildings.append(
+            BuildingCoverage(
+                building_id=bld["building_id"],
+                building_name=bld["building_name"],
+                total_flats=total,
+                covered_flats=covered,
+                unassigned_flats=total - covered,
+                building_inspectors=(
+                    project_inspectors
+                    + inspectors_by_building.get(bld["building_id"], [])
+                ),
+                floors=bld["floors"],
+            )
+        )
+
+    for row in hierarchy_rows:
+        if current_bld is None or current_bld["building_id"] != row.building_id:
+            if current_floor is not None and current_bld is not None:
+                finalize_floor(current_floor, current_bld)
+                current_floor = None
+            if current_bld is not None:
+                finalize_building(current_bld)
+            current_bld = {
+                "building_id": row.building_id,
+                "building_name": row.building_name,
+                "floors": [],
+            }
+
+        if row.floor_id is None:
+            continue  # Building with no floors — finalized with empty floors list.
+
+        if current_floor is None or current_floor["floor_id"] != row.floor_id:
+            if current_floor is not None:
+                finalize_floor(current_floor, current_bld)
+            current_floor = {
+                "floor_id": row.floor_id,
+                "floor_number": row.floor_number,
+                "flats": [],
+            }
+
+        if row.flat_id is None:
+            continue  # Floor with no flats.
+
+        # Per-flat inspectors = project-level + building-level + flat-level.
+        flat_inspectors = (
+            project_inspectors
+            + inspectors_by_building.get(row.building_id, [])
+            + inspectors_by_flat.get(row.flat_id, [])
+        )
+        current_floor["flats"].append(
+            FlatCoverage(
+                flat_id=row.flat_id,
+                flat_number=row.flat_number,
+                flat_type=row.flat_type,
+                inspection_status=row.inspection_status,
+                assigned_inspectors=flat_inspectors,
+            )
+        )
+
+    if current_floor is not None and current_bld is not None:
+        finalize_floor(current_floor, current_bld)
+    if current_bld is not None:
+        finalize_building(current_bld)
+
+    total_flats = sum(b.total_flats for b in buildings)
+    covered_flats = sum(b.covered_flats for b in buildings)
+
+    return AssignmentCoverageResponse(
+        project_id=project.id,
+        project_name=project.name,
+        total_flats=total_flats,
+        covered_flats=covered_flats,
+        unassigned_flats=total_flats - covered_flats,
+        project_inspectors=project_inspectors,
+        buildings=buildings,
+    )
+
+
+@router.get("/users/summary", response_model=UsersSummary)
+async def users_summary(
+    _manager: Annotated[User, Depends(require_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UsersSummary:
+    """Top-of-page stats for the Users admin page.
+
+    `total_unassigned_flats` counts flats with no inspector via any assignment
+    level across the whole system — the signal that drives the "needs
+    attention" badge in the summary strip.
+    """
+    role_counts = (
+        await db.execute(
+            select(
+                func.count(User.id).label("total"),
+                func.count(case((User.role == "MANAGER", User.id))).label("managers"),
+                func.count(case((User.role == "INSPECTOR", User.id))).label(
+                    "inspectors"
+                ),
+            )
+        )
+    ).one()
+
+    # Inspectors with zero assignments at any level.
+    inspector_ids_with_any = set()
+    for stmt in (
+        select(UserProjectAssignment.user_id)
+        .join(User, User.id == UserProjectAssignment.user_id)
+        .where(User.role == "INSPECTOR"),
+        select(UserBuildingAssignment.user_id)
+        .join(User, User.id == UserBuildingAssignment.user_id)
+        .where(User.role == "INSPECTOR"),
+        select(UserFlatAssignment.user_id)
+        .join(User, User.id == UserFlatAssignment.user_id)
+        .where(User.role == "INSPECTOR"),
+    ):
+        rows = (await db.execute(stmt)).all()
+        inspector_ids_with_any.update(r[0] for r in rows)
+    idle_inspectors = max(0, role_counts.inspectors - len(inspector_ids_with_any))
+
+    # Unassigned flats = total flats - flats covered by any inspector
+    # at project, building, or flat level.
+    covered_project_ids = {
+        r[0]
+        for r in (
+            await db.execute(
+                select(UserProjectAssignment.project_id)
+                .join(User, User.id == UserProjectAssignment.user_id)
+                .where(User.role == "INSPECTOR")
+            )
+        ).all()
+    }
+    covered_building_ids = {
+        r[0]
+        for r in (
+            await db.execute(
+                select(UserBuildingAssignment.building_id)
+                .join(User, User.id == UserBuildingAssignment.user_id)
+                .where(User.role == "INSPECTOR")
+            )
+        ).all()
+    }
+    covered_flat_ids = {
+        r[0]
+        for r in (
+            await db.execute(
+                select(UserFlatAssignment.flat_id)
+                .join(User, User.id == UserFlatAssignment.user_id)
+                .where(User.role == "INSPECTOR")
+            )
+        ).all()
+    }
+
+    flat_rows = (
+        await db.execute(
+            select(
+                Flat.id,
+                Floor.building_id,
+                Building.project_id,
+            )
+            .join(Floor, Floor.id == Flat.floor_id)
+            .join(Building, Building.id == Floor.building_id)
+        )
+    ).all()
+    total_unassigned_flats = sum(
+        1
+        for r in flat_rows
+        if r.project_id not in covered_project_ids
+        and r.building_id not in covered_building_ids
+        and r.id not in covered_flat_ids
+    )
+
+    return UsersSummary(
+        total_users=role_counts.total,
+        total_managers=role_counts.managers,
+        total_inspectors=role_counts.inspectors,
+        idle_inspectors=idle_inspectors,
+        total_unassigned_flats=total_unassigned_flats,
+    )
