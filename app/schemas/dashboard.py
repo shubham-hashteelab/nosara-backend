@@ -1,6 +1,5 @@
 import uuid
-from datetime import datetime
-from typing import Optional
+from datetime import date
 
 from pydantic import BaseModel
 
@@ -24,6 +23,8 @@ class ProjectStats(BaseModel):
 
 
 class BuildingStats(BaseModel):
+    """Legacy per-building entry-count stats served by /dashboard/buildings/{id}/stats."""
+
     building_id: uuid.UUID
     building_name: str
     total_floors: int
@@ -34,20 +35,21 @@ class BuildingStats(BaseModel):
     na_count: int
 
 
-class OverdueSnag(BaseModel):
-    entry_id: uuid.UUID
-    flat_id: uuid.UUID
-    room_label: str
-    item_name: str
-    severity: Optional[str] = None
-    contractor_name: Optional[str] = None
-    due_date: Optional[datetime] = None
-    days_overdue: int
+class ProjectBuildingStats(BaseModel):
+    """Per-building flat/snag rollup used by the project dashboard's building table."""
+
+    building_id: uuid.UUID
+    building_name: str
+    total_flats: int
+    inspected_flats: int
+    in_progress_flats: int
+    total_snags: int
+    open_snags: int
 
 
 class InspectorActivity(BaseModel):
     inspector_id: uuid.UUID
     inspector_name: str
-    total_entries: int
+    date: date
+    entries_checked: int
     snags_found: int
-    last_activity: Optional[datetime] = None

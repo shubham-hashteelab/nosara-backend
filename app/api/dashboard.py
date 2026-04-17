@@ -1,14 +1,13 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.models.building import Building
-from app.models.contractor import Contractor, SnagContractorAssignment
 from app.models.flat import Flat
 from app.models.floor import Floor
 from app.models.inspection import InspectionEntry
@@ -17,9 +16,17 @@ from app.models.user import User
 from app.schemas.dashboard import (
     BuildingStats,
     InspectorActivity,
-    OverdueSnag,
+    ProjectBuildingStats,
     ProjectStats,
 )
+
+
+async def _ensure_project_exists(
+    db: AsyncSession, project_id: uuid.UUID
+) -> None:
+    result = await db.execute(select(Project.id).where(Project.id == project_id))
+    if result.scalar() is None:
+        raise HTTPException(status_code=404, detail="Project not found")
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -204,88 +211,126 @@ async def building_stats(
     )
 
 
-@router.get("/overdue-snags", response_model=list[OverdueSnag])
-async def overdue_snags(
-    _user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[OverdueSnag]:
-    now = datetime.now(timezone.utc)
-
-    result = await db.execute(
-        select(
-            InspectionEntry.id,
-            InspectionEntry.flat_id,
-            InspectionEntry.room_label,
-            InspectionEntry.item_name,
-            InspectionEntry.severity,
-            Contractor.name.label("contractor_name"),
-            SnagContractorAssignment.due_date,
-        )
-        .join(
-            SnagContractorAssignment,
-            SnagContractorAssignment.inspection_entry_id == InspectionEntry.id,
-        )
-        .join(
-            Contractor,
-            Contractor.id == SnagContractorAssignment.contractor_id,
-        )
-        .where(
-            InspectionEntry.status == "SNAG",
-            InspectionEntry.snag_fix_status.in_(["OPEN", "IN_PROGRESS"]),
-            SnagContractorAssignment.due_date != None,  # noqa: E711
-            SnagContractorAssignment.due_date < now.date(),
-        )
-        .order_by(SnagContractorAssignment.due_date)
-    )
-    rows = result.all()
-
-    overdue: list[OverdueSnag] = []
-    for row in rows:
-        days = (now.date() - row.due_date).days
-        overdue.append(
-            OverdueSnag(
-                entry_id=row.id,
-                flat_id=row.flat_id,
-                room_label=row.room_label,
-                item_name=row.item_name,
-                severity=row.severity,
-                contractor_name=row.contractor_name,
-                due_date=datetime.combine(row.due_date, datetime.min.time()),
-                days_overdue=days,
-            )
-        )
-    return overdue
-
-
-@router.get("/inspector-activity", response_model=list[InspectorActivity])
+@router.get(
+    "/projects/{project_id}/inspector-activity",
+    response_model=list[InspectorActivity],
+)
 async def inspector_activity(
+    project_id: uuid.UUID,
     _user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    days: Annotated[int, Query(ge=1, le=90)] = 7,
 ) -> list[InspectorActivity]:
+    await _ensure_project_exists(db, project_id)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    day_bucket = func.date(InspectionEntry.updated_at).label("date")
+
     result = await db.execute(
         select(
             User.id,
             User.full_name,
-            func.count(InspectionEntry.id).label("total_entries"),
+            day_bucket,
+            func.count(InspectionEntry.id).label("entries_checked"),
             func.count(
                 case((InspectionEntry.status == "SNAG", InspectionEntry.id))
             ).label("snags_found"),
-            func.max(InspectionEntry.updated_at).label("last_activity"),
         )
-        .outerjoin(InspectionEntry, InspectionEntry.inspector_id == User.id)
-        .where(User.role == "INSPECTOR")
-        .group_by(User.id, User.full_name)
-        .order_by(func.count(InspectionEntry.id).desc())
+        .join(InspectionEntry, InspectionEntry.inspector_id == User.id)
+        .join(Flat, Flat.id == InspectionEntry.flat_id)
+        .join(Floor, Floor.id == Flat.floor_id)
+        .join(Building, Building.id == Floor.building_id)
+        .where(
+            Building.project_id == project_id,
+            User.role == "INSPECTOR",
+            InspectionEntry.updated_at >= cutoff,
+        )
+        .group_by(User.id, User.full_name, day_bucket)
+        .order_by(day_bucket)
     )
-    rows = result.all()
 
     return [
         InspectorActivity(
             inspector_id=row.id,
             inspector_name=row.full_name,
-            total_entries=row.total_entries,
+            date=row.date,
+            entries_checked=row.entries_checked,
             snags_found=row.snags_found,
-            last_activity=row.last_activity,
         )
-        for row in rows
+        for row in result.all()
+    ]
+
+
+@router.get(
+    "/projects/{project_id}/building-stats",
+    response_model=list[ProjectBuildingStats],
+)
+async def project_building_stats(
+    project_id: uuid.UUID,
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ProjectBuildingStats]:
+    await _ensure_project_exists(db, project_id)
+
+    # Two queries, merged in Python: joining flats AND entries in one query
+    # would multiply row counts (a flat with N entries gets counted N times),
+    # breaking the flat-status aggregates.
+    flat_result = await db.execute(
+        select(
+            Building.id.label("building_id"),
+            Building.name.label("building_name"),
+            func.count(Flat.id).label("total_flats"),
+            func.count(
+                case((Flat.inspection_status == "COMPLETED", Flat.id))
+            ).label("inspected_flats"),
+            func.count(
+                case((Flat.inspection_status == "IN_PROGRESS", Flat.id))
+            ).label("in_progress_flats"),
+        )
+        .outerjoin(Floor, Floor.building_id == Building.id)
+        .outerjoin(Flat, Flat.floor_id == Floor.id)
+        .where(Building.project_id == project_id)
+        .group_by(Building.id, Building.name)
+        .order_by(Building.name)
+    )
+    flat_rows = flat_result.all()
+
+    snag_result = await db.execute(
+        select(
+            Building.id.label("building_id"),
+            func.count(InspectionEntry.id).label("total_snags"),
+            func.count(
+                case(
+                    (
+                        InspectionEntry.snag_fix_status == "OPEN",
+                        InspectionEntry.id,
+                    )
+                )
+            ).label("open_snags"),
+        )
+        .join(Floor, Floor.building_id == Building.id)
+        .join(Flat, Flat.floor_id == Floor.id)
+        .join(InspectionEntry, InspectionEntry.flat_id == Flat.id)
+        .where(
+            Building.project_id == project_id,
+            InspectionEntry.status == "SNAG",
+        )
+        .group_by(Building.id)
+    )
+    snags_by_building = {
+        row.building_id: (row.total_snags, row.open_snags)
+        for row in snag_result.all()
+    }
+
+    return [
+        ProjectBuildingStats(
+            building_id=row.building_id,
+            building_name=row.building_name,
+            total_flats=row.total_flats,
+            inspected_flats=row.inspected_flats,
+            in_progress_flats=row.in_progress_flats,
+            total_snags=snags_by_building.get(row.building_id, (0, 0))[0],
+            open_snags=snags_by_building.get(row.building_id, (0, 0))[1],
+        )
+        for row in flat_rows
     ]
