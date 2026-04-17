@@ -132,6 +132,11 @@ echo "PostgreSQL ready."
 # 4. Start MinIO (background)
 # ----------------------------------------
 echo "Starting MinIO..."
+
+# Kill any MinIO left over from a previous run so :9000/:9001 are free
+lsof -ti :9000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+lsof -ti :9001 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+
 export MINIO_ROOT_USER=minioadmin
 export MINIO_ROOT_PASSWORD=minioadmin
 minio server "$MINIO_DATA" --console-address ":9001" --address ":9000" > "$LOG_DIR/minio.log" 2>&1 &
@@ -193,6 +198,9 @@ fi
 # ----------------------------------------
 # 8. Start FastAPI
 # ----------------------------------------
+# Kill any uvicorn left over from a previous run so :8000 is free
+lsof -ti :8000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+
 echo ""
 echo "========================================"
 echo "  Nosara Backend running on :8000"
