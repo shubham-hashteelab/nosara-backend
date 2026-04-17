@@ -114,26 +114,46 @@ async def initialize_flat_checklist(
     return created
 
 
+_BACKFILL_ADVISORY_LOCK_KEY = 0x4E4F5341  # "NOSA" — arbitrary stable magic number
+
+
 async def backfill_uninitialized_flats(db: AsyncSession) -> int:
     """
     Find every flat with zero inspection entries and initialize its checklist.
 
     Runs on startup to cover flats created before auto-init-on-create existed.
-    Idempotent — safe to run every boot. Returns count of flats initialized.
+    Serialized across uvicorn workers via a PostgreSQL session-level advisory
+    lock — lifespan fires per-worker, so without the lock two workers would
+    race and each create a full entry set per flat.
+
+    Idempotent — safe to run every boot. Returns count of flats initialized
+    (0 if this worker didn't hold the lock).
     """
-    subq = select(InspectionEntry.flat_id).distinct()
-    result = await db.execute(select(Flat.id).where(Flat.id.notin_(subq)))
-    flat_ids = [row[0] for row in result.all()]
+    locked = await db.scalar(
+        select(func.pg_try_advisory_lock(_BACKFILL_ADVISORY_LOCK_KEY))
+    )
+    if not locked:
+        logger.info("Backfill: another worker holds the advisory lock, skipping.")
+        return 0
 
-    init_count = 0
-    for flat_id in flat_ids:
-        created = await initialize_flat_checklist(flat_id, db)
-        if created:
-            await recompute_flat_inspection_status(flat_id, db)
-            init_count += 1
+    try:
+        subq = select(InspectionEntry.flat_id).distinct()
+        result = await db.execute(select(Flat.id).where(Flat.id.notin_(subq)))
+        flat_ids = [row[0] for row in result.all()]
 
-    if init_count > 0:
-        await db.commit()
-        logger.info("Backfill: initialized checklists for %d flats", init_count)
+        init_count = 0
+        for flat_id in flat_ids:
+            created = await initialize_flat_checklist(flat_id, db)
+            if created:
+                await recompute_flat_inspection_status(flat_id, db)
+                init_count += 1
 
-    return init_count
+        if init_count > 0:
+            await db.commit()
+            logger.info("Backfill: initialized checklists for %d flats", init_count)
+
+        return init_count
+    finally:
+        await db.execute(
+            select(func.pg_advisory_unlock(_BACKFILL_ADVISORY_LOCK_KEY))
+        )

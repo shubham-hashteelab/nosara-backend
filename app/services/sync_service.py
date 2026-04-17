@@ -54,7 +54,7 @@ class SyncService:
                     continue
 
                 if op.operation == "CREATE":
-                    # Check if record already exists (idempotent — don't create duplicates)
+                    # Idempotent by primary key
                     existing = await db.execute(select(model).where(model.id == op.entity_id))
                     if existing.scalars().first() is not None:
                         accepted.append(str(op.entity_id))
@@ -64,6 +64,22 @@ class SyncService:
                     data["id"] = op.entity_id
                     if op.entity_type == "inspection_entry":
                         data["inspector_id"] = inspector_id
+                        # Also idempotent by content — prevents duplicates when
+                        # the app queued a CREATE for a flat that the backend
+                        # auto-initialized independently. Without this check the
+                        # unique index on (flat_id, room_label, category, item_name)
+                        # would 409 at flush and abort the whole push transaction.
+                        content_dup = await db.execute(
+                            select(InspectionEntry).where(
+                                InspectionEntry.flat_id == data.get("flat_id"),
+                                InspectionEntry.room_label == data.get("room_label"),
+                                InspectionEntry.category == data.get("category"),
+                                InspectionEntry.item_name == data.get("item_name"),
+                            )
+                        )
+                        if content_dup.scalars().first() is not None:
+                            accepted.append(str(op.entity_id))
+                            continue
                     obj = model(**data)
                     db.add(obj)
                     await db.flush()
