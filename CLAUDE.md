@@ -74,7 +74,13 @@ alembic/                 # DB migrations
   - `POST/DELETE /users/{id}/assign-flat/{flatId}`
   - UserResponse includes `assigned_project_ids`, `assigned_building_ids`, `assigned_flat_ids`
 - **Seed:** `POST /seed-hierarchy` (5 Godrej projects + towers/floors/flats), `POST /checklist-templates/seed-defaults` (templates + rooms + floor plans). Both reject if already seeded.
-- **Dashboard:** `GET /dashboard/projects/{id}/stats` — returns flat-level status counts (`inspected_flats`, `in_progress_flats`, `not_started_flats`) from `Flat.inspection_status` column, plus snag severity/category breakdowns. Route paths use plural (`/projects/`, `/buildings/`).
+- **Dashboard:**
+  - `GET /dashboard/projects/{id}/stats` — project-wide flat-status counts (from `Flat.inspection_status`) + snag severity/category breakdowns.
+  - `GET /dashboard/projects/{id}/building-stats` — flat per-tower list (legacy; simpler shape, no floor nesting).
+  - `GET /dashboard/projects/{id}/tower-stats` — per-tower rollup with nested per-floor progress + per-tower snag severity breakdown. Three separate SQL queries (towers, per-floor flat counts, per-tower snag counts) stitched in Python to avoid row multiplication from joining flats and entries together. Buildings with 0 floors still surface with empty `floors`.
+  - `GET /dashboard/projects-overview` — cross-project rollup: every project with its tower-level (no floor) progress in one response. Used by the portal's Projects list page for tower mini-cards.
+  - `GET /dashboard/projects/{id}/inspector-activity?days=N` — day-bucketed per-inspector counts.
+  - Route paths use plural (`/projects/`, `/buildings/`).
 - **Checklists / Contractors:** Manager CRUD
 
 ## Granular Access Control

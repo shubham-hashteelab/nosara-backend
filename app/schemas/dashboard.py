@@ -53,3 +53,73 @@ class InspectorActivity(BaseModel):
     date: date
     entries_checked: int
     snags_found: int
+
+
+class FloorProgress(BaseModel):
+    floor_id: uuid.UUID
+    floor_number: int
+    label: str
+    total_flats: int
+    inspected_flats: int
+    in_progress_flats: int
+    not_started_flats: int
+    completion_pct: float
+    open_snags: int
+
+
+class TowerProgress(BaseModel):
+    """Per-tower (building) flat/snag rollup with nested per-floor breakdown."""
+
+    building_id: uuid.UUID
+    building_name: str
+    total_flats: int
+    inspected_flats: int
+    in_progress_flats: int
+    not_started_flats: int
+    completion_pct: float
+    total_snags: int
+    open_snags: int
+    critical_snags: int
+    major_snags: int
+    minor_snags: int
+    floors: list[FloorProgress]
+
+
+class TowerStatsResponse(BaseModel):
+    project_id: uuid.UUID
+    project_name: str
+    total_flats: int
+    inspected_flats: int
+    in_progress_flats: int
+    not_started_flats: int
+    completion_pct: float
+    towers: list[TowerProgress]
+
+
+class TowerMini(BaseModel):
+    """Lightweight per-tower summary for the projects-overview card strip."""
+
+    building_id: uuid.UUID
+    building_name: str
+    total_flats: int
+    inspected_flats: int
+    in_progress_flats: int
+    not_started_flats: int
+    completion_pct: float
+
+
+class ProjectOverview(BaseModel):
+    project_id: uuid.UUID
+    project_name: str
+    location: str
+    total_buildings: int
+    total_flats: int
+    inspected_flats: int
+    in_progress_flats: int
+    not_started_flats: int
+    completion_pct: float
+    towers: list[TowerMini]
+
+
+class ProjectsOverviewResponse(BaseModel):
+    projects: list[ProjectOverview]

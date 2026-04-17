@@ -15,10 +15,20 @@ from app.models.project import Project
 from app.models.user import User
 from app.schemas.dashboard import (
     BuildingStats,
+    FloorProgress,
     InspectorActivity,
     ProjectBuildingStats,
+    ProjectOverview,
     ProjectStats,
+    ProjectsOverviewResponse,
+    TowerMini,
+    TowerProgress,
+    TowerStatsResponse,
 )
+
+
+def _pct(completed: int, total: int) -> float:
+    return round((completed / total) * 100, 1) if total > 0 else 0.0
 
 
 async def _ensure_project_exists(
@@ -334,3 +344,272 @@ async def project_building_stats(
         )
         for row in flat_rows
     ]
+
+
+@router.get(
+    "/projects/{project_id}/tower-stats",
+    response_model=TowerStatsResponse,
+)
+async def tower_stats(
+    project_id: uuid.UUID,
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TowerStatsResponse:
+    """
+    Per-tower rollup with nested per-floor progress for the manager dashboard.
+    Aggregates are computed in SQL, then stitched in Python so that flat-status
+    counts and snag counts never share a join graph (which would multiply rows).
+    """
+    proj_result = await db.execute(select(Project).where(Project.id == project_id))
+    project = proj_result.scalars().first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Every building in the project, even those with zero floors/flats — we
+    # want them to appear (empty) in the dashboard rather than vanish.
+    bld_rows = (
+        await db.execute(
+            select(Building.id, Building.name)
+            .where(Building.project_id == project_id)
+            .order_by(Building.name)
+        )
+    ).all()
+
+    # Per-floor flat-status counts (floors only; buildings with 0 floors
+    # won't appear here and get an empty floors list below).
+    floor_rows = (
+        await db.execute(
+            select(
+                Building.id.label("building_id"),
+                Floor.id.label("floor_id"),
+                Floor.floor_number.label("floor_number"),
+                func.count(Flat.id).label("total_flats"),
+                func.count(
+                    case((Flat.inspection_status == "COMPLETED", Flat.id))
+                ).label("inspected"),
+                func.count(
+                    case((Flat.inspection_status == "IN_PROGRESS", Flat.id))
+                ).label("in_progress"),
+                func.count(
+                    case((Flat.inspection_status == "NOT_STARTED", Flat.id))
+                ).label("not_started"),
+            )
+            .join(Floor, Floor.building_id == Building.id)
+            .outerjoin(Flat, Flat.floor_id == Floor.id)
+            .where(Building.project_id == project_id)
+            .group_by(Building.id, Floor.id, Floor.floor_number)
+            .order_by(Building.id, Floor.floor_number)
+        )
+    ).all()
+
+    # Per-floor open-snag counts.
+    floor_snag_rows = (
+        await db.execute(
+            select(
+                Floor.id.label("floor_id"),
+                func.count(InspectionEntry.id).label("open_snags"),
+            )
+            .join(Flat, Flat.floor_id == Floor.id)
+            .join(InspectionEntry, InspectionEntry.flat_id == Flat.id)
+            .join(Building, Building.id == Floor.building_id)
+            .where(
+                Building.project_id == project_id,
+                InspectionEntry.status == "SNAG",
+                InspectionEntry.snag_fix_status == "OPEN",
+            )
+            .group_by(Floor.id)
+        )
+    ).all()
+    open_snags_by_floor = {row.floor_id: row.open_snags for row in floor_snag_rows}
+
+    # Per-tower snag aggregates — kept in a separate query to avoid row
+    # multiplication against the flat-status counts above.
+    tower_snag_rows = (
+        await db.execute(
+            select(
+                Building.id.label("building_id"),
+                func.count(InspectionEntry.id).label("total_snags"),
+                func.count(
+                    case(
+                        (
+                            InspectionEntry.snag_fix_status == "OPEN",
+                            InspectionEntry.id,
+                        )
+                    )
+                ).label("open_snags"),
+                func.count(
+                    case((InspectionEntry.severity == "CRITICAL", InspectionEntry.id))
+                ).label("critical"),
+                func.count(
+                    case((InspectionEntry.severity == "MAJOR", InspectionEntry.id))
+                ).label("major"),
+                func.count(
+                    case((InspectionEntry.severity == "MINOR", InspectionEntry.id))
+                ).label("minor"),
+            )
+            .join(Floor, Floor.building_id == Building.id)
+            .join(Flat, Flat.floor_id == Floor.id)
+            .join(InspectionEntry, InspectionEntry.flat_id == Flat.id)
+            .where(
+                Building.project_id == project_id,
+                InspectionEntry.status == "SNAG",
+            )
+            .group_by(Building.id)
+        )
+    ).all()
+    snags_by_tower = {
+        row.building_id: {
+            "total": row.total_snags,
+            "open": row.open_snags,
+            "critical": row.critical,
+            "major": row.major,
+            "minor": row.minor,
+        }
+        for row in tower_snag_rows
+    }
+
+    floors_by_tower: dict[uuid.UUID, list[FloorProgress]] = {}
+    for row in floor_rows:
+        floors_by_tower.setdefault(row.building_id, []).append(
+            FloorProgress(
+                floor_id=row.floor_id,
+                floor_number=row.floor_number,
+                label=f"Floor {row.floor_number}",
+                total_flats=row.total_flats,
+                inspected_flats=row.inspected,
+                in_progress_flats=row.in_progress,
+                not_started_flats=row.not_started,
+                completion_pct=_pct(row.inspected, row.total_flats),
+                open_snags=open_snags_by_floor.get(row.floor_id, 0),
+            )
+        )
+
+    towers: list[TowerProgress] = []
+    for bld in bld_rows:
+        floors = floors_by_tower.get(bld.id, [])
+        total = sum(f.total_flats for f in floors)
+        inspected = sum(f.inspected_flats for f in floors)
+        in_progress = sum(f.in_progress_flats for f in floors)
+        not_started = sum(f.not_started_flats for f in floors)
+        snags = snags_by_tower.get(
+            bld.id,
+            {"total": 0, "open": 0, "critical": 0, "major": 0, "minor": 0},
+        )
+        towers.append(
+            TowerProgress(
+                building_id=bld.id,
+                building_name=bld.name,
+                total_flats=total,
+                inspected_flats=inspected,
+                in_progress_flats=in_progress,
+                not_started_flats=not_started,
+                completion_pct=_pct(inspected, total),
+                total_snags=snags["total"],
+                open_snags=snags["open"],
+                critical_snags=snags["critical"],
+                major_snags=snags["major"],
+                minor_snags=snags["minor"],
+                floors=floors,
+            )
+        )
+
+    proj_total = sum(t.total_flats for t in towers)
+    proj_inspected = sum(t.inspected_flats for t in towers)
+    proj_in_progress = sum(t.in_progress_flats for t in towers)
+    proj_not_started = sum(t.not_started_flats for t in towers)
+
+    return TowerStatsResponse(
+        project_id=project.id,
+        project_name=project.name,
+        total_flats=proj_total,
+        inspected_flats=proj_inspected,
+        in_progress_flats=proj_in_progress,
+        not_started_flats=proj_not_started,
+        completion_pct=_pct(proj_inspected, proj_total),
+        towers=towers,
+    )
+
+
+@router.get(
+    "/projects-overview",
+    response_model=ProjectsOverviewResponse,
+)
+async def projects_overview(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProjectsOverviewResponse:
+    """
+    Lightweight cross-project rollup for the Projects list page: every project
+    with its tower-level (no floor) progress, in a single response.
+    """
+    project_rows = (
+        await db.execute(
+            select(Project.id, Project.name, Project.location).order_by(Project.name)
+        )
+    ).all()
+
+    if not project_rows:
+        return ProjectsOverviewResponse(projects=[])
+
+    # Per-tower flat-status rollup for all projects at once.
+    tower_rows = (
+        await db.execute(
+            select(
+                Building.project_id.label("project_id"),
+                Building.id.label("building_id"),
+                Building.name.label("building_name"),
+                func.count(Flat.id).label("total_flats"),
+                func.count(
+                    case((Flat.inspection_status == "COMPLETED", Flat.id))
+                ).label("inspected"),
+                func.count(
+                    case((Flat.inspection_status == "IN_PROGRESS", Flat.id))
+                ).label("in_progress"),
+                func.count(
+                    case((Flat.inspection_status == "NOT_STARTED", Flat.id))
+                ).label("not_started"),
+            )
+            .outerjoin(Floor, Floor.building_id == Building.id)
+            .outerjoin(Flat, Flat.floor_id == Floor.id)
+            .group_by(Building.project_id, Building.id, Building.name)
+            .order_by(Building.project_id, Building.name)
+        )
+    ).all()
+
+    towers_by_project: dict[uuid.UUID, list[TowerMini]] = {}
+    for row in tower_rows:
+        towers_by_project.setdefault(row.project_id, []).append(
+            TowerMini(
+                building_id=row.building_id,
+                building_name=row.building_name,
+                total_flats=row.total_flats,
+                inspected_flats=row.inspected,
+                in_progress_flats=row.in_progress,
+                not_started_flats=row.not_started,
+                completion_pct=_pct(row.inspected, row.total_flats),
+            )
+        )
+
+    projects = []
+    for p in project_rows:
+        towers = towers_by_project.get(p.id, [])
+        total = sum(t.total_flats for t in towers)
+        inspected = sum(t.inspected_flats for t in towers)
+        in_progress = sum(t.in_progress_flats for t in towers)
+        not_started = sum(t.not_started_flats for t in towers)
+        projects.append(
+            ProjectOverview(
+                project_id=p.id,
+                project_name=p.name,
+                location=p.location,
+                total_buildings=len(towers),
+                total_flats=total,
+                inspected_flats=inspected,
+                in_progress_flats=in_progress,
+                not_started_flats=not_started,
+                completion_pct=_pct(inspected, total),
+                towers=towers,
+            )
+        )
+
+    return ProjectsOverviewResponse(projects=projects)
