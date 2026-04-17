@@ -6,11 +6,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "=== Nosara Backend Startup ==="
 
+# Some RunPod pods block outbound HTTP (port 80) but allow HTTPS (443).
+# Default Ubuntu apt sources use http://, so apt fails with connection timeouts.
+# Detect once and rewrite sources to https:// if HTTP is unreachable.
+ensure_apt_reachable() {
+    if curl -sf --connect-timeout 5 -o /dev/null http://archive.ubuntu.com/; then
+        return 0
+    fi
+    echo "HTTP to archive.ubuntu.com blocked; switching apt sources to HTTPS."
+    sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list
+    sed -i 's|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list
+    if ls /etc/apt/sources.list.d/*.list >/dev/null 2>&1; then
+        sed -i 's|http://ppa.launchpad.net|https://ppa.launchpadcontent.net|g' /etc/apt/sources.list.d/*.list
+    fi
+}
+
 # ----------------------------------------
 # 1. Install system packages if not present
 # ----------------------------------------
 if ! command -v pg_isready &> /dev/null; then
     echo "Installing PostgreSQL and system deps..."
+    ensure_apt_reachable
     apt-get update -qq
     apt-get install -y --no-install-recommends \
         postgresql postgresql-client curl wget sudo \
@@ -39,6 +55,7 @@ export PATH="$HOME/.local/bin:$PATH"
 if ! python3.12 --version &> /dev/null; then
     echo "Installing Python 3.12..."
     add-apt-repository -y ppa:deadsnakes/ppa > /dev/null 2>&1
+    ensure_apt_reachable
     apt-get update -qq
     apt-get install -y --no-install-recommends \
         python3.12 python3.12-venv python3.12-dev \
