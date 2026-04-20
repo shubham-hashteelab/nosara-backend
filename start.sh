@@ -1,83 +1,41 @@
 #!/bin/bash
 set -e
 
-# Resolve script directory upfront (before any cd)
+# Boot script for the Nosara backend pod.
+# Assumes install.sh has already been run (postgres, minio, uv, python3.12, venv + deps).
+# Starts PostgreSQL, MinIO, runs migrations, and execs uvicorn.
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-echo "=== Nosara Backend Startup ==="
-
-# Some RunPod pods block outbound HTTP (port 80) but allow HTTPS (443).
-# Default Ubuntu apt sources use http://, so apt fails with connection timeouts.
-# Detect once and rewrite sources to https:// if HTTP is unreachable.
-ensure_apt_reachable() {
-    if curl -sf --connect-timeout 5 -o /dev/null http://archive.ubuntu.com/; then
-        return 0
-    fi
-    echo "HTTP to archive.ubuntu.com blocked; switching apt sources to HTTPS."
-    sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list
-    sed -i 's|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list
-    if ls /etc/apt/sources.list.d/*.list >/dev/null 2>&1; then
-        sed -i 's|http://ppa.launchpad.net|https://ppa.launchpadcontent.net|g' /etc/apt/sources.list.d/*.list
-    fi
-}
-
-# ----------------------------------------
-# 1. Install system packages if not present
-# ----------------------------------------
-if ! command -v pg_isready &> /dev/null; then
-    echo "Installing PostgreSQL and system deps..."
-    ensure_apt_reachable
-    apt-get update -qq
-    apt-get install -y --no-install-recommends \
-        postgresql postgresql-client curl wget sudo \
-        software-properties-common \
-        > /dev/null 2>&1
-    rm -rf /var/lib/apt/lists/*
-fi
-
-# Install MinIO server if not present
-if ! command -v minio &> /dev/null; then
-    echo "Downloading MinIO server..."
-    wget -q https://dl.min.io/server/minio/release/linux-amd64/minio -O /usr/local/bin/minio
-    chmod +x /usr/local/bin/minio
-fi
-
-# Install uv if not present
-if ! command -v uv &> /dev/null; then
-    echo "Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-fi
-export PATH="$HOME/.local/bin:$PATH"
-
-# ----------------------------------------
-# 1b. Ensure Python 3.12 is available
-# ----------------------------------------
-if ! python3.12 --version &> /dev/null; then
-    echo "Installing Python 3.12..."
-    add-apt-repository -y ppa:deadsnakes/ppa > /dev/null 2>&1
-    ensure_apt_reachable
-    apt-get update -qq
-    apt-get install -y --no-install-recommends \
-        python3.12 python3.12-venv python3.12-dev \
-        > /dev/null 2>&1
-    rm -rf /var/lib/apt/lists/*
-fi
-
-# ----------------------------------------
-# 2. Setup data directories
-# ----------------------------------------
 DATA_DIR="${RUNPOD_VOLUME_PATH:-/workspace}"
 PG_DATA="$DATA_DIR/pgdata"
 MINIO_DATA="$DATA_DIR/miniodata"
 LOG_DIR="$DATA_DIR/logs"
+VENV_DIR="$DATA_DIR/venv"
 
+export PATH="$HOME/.local/bin:$PATH"
+
+echo "=== Nosara Backend Startup ==="
+
+# Fail fast if install.sh hasn't been run yet.
+for cmd in pg_isready minio uv python3.12; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "ERROR: '$cmd' not found. Run 'bash install.sh' first." >&2
+        exit 1
+    fi
+done
+if [ ! -d "$VENV_DIR" ]; then
+    echo "ERROR: venv not found at $VENV_DIR. Run 'bash install.sh' first." >&2
+    exit 1
+fi
+
+# ----------------------------------------
+# 1. Data directories
+# ----------------------------------------
 mkdir -p "$MINIO_DATA" "$LOG_DIR"
-
-# Give postgres user ownership of its directories
 chown -R postgres:postgres "$LOG_DIR"
 
 # ----------------------------------------
-# 3. Start PostgreSQL
+# 2. PostgreSQL
 # ----------------------------------------
 echo "Starting PostgreSQL..."
 
@@ -91,17 +49,14 @@ if [ ! -d "$PG_DATA/base" ]; then
     chown -R postgres:postgres "$PG_DATA"
     cd /tmp && sudo -u postgres $PG_BIN/initdb -D "$PG_DATA"
 
-    # Configure PostgreSQL
     cat >> "$PG_DATA/postgresql.conf" <<PGCONF
 listen_addresses = 'localhost'
 port = 5432
 PGCONF
 
-    # Allow password auth for local TCP connections
     echo "host all all 127.0.0.1/32 md5" >> "$PG_DATA/pg_hba.conf"
 fi
 
-# Ensure correct ownership (may have been created by root on first run)
 chown -R postgres:postgres "$PG_DATA"
 
 # Stop any existing PostgreSQL instance and clean stale pid
@@ -111,15 +66,13 @@ if sudo -u postgres $PG_BIN/pg_ctl status -D "$PG_DATA" > /dev/null 2>&1; then
     sudo -u postgres $PG_BIN/pg_ctl stop -D "$PG_DATA" -m fast -w || true
     sleep 1
 fi
-# Remove stale pid file if exists
 rm -f "$PG_DATA/postmaster.pid"
 
-# Start PostgreSQL as postgres user
 sudo -u postgres $PG_BIN/pg_ctl start -D "$PG_DATA" -l "$LOG_DIR/postgresql.log" -w -t 30
 
 echo "PostgreSQL started."
 
-# Create database and user if not exists (cd /tmp so postgres user has cwd access)
+# Create database and user if not exists
 cd /tmp
 sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='nosara'" | grep -q 1 \
     || sudo -u postgres psql -c "CREATE USER nosara WITH PASSWORD 'nosara';"
@@ -129,11 +82,10 @@ sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='nosara'" | g
 echo "PostgreSQL ready."
 
 # ----------------------------------------
-# 4. Start MinIO (background)
+# 3. MinIO
 # ----------------------------------------
 echo "Starting MinIO..."
 
-# Kill any MinIO left over from a previous run so :9000/:9001 are free
 lsof -ti :9000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 lsof -ti :9001 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
@@ -141,7 +93,6 @@ export MINIO_ROOT_USER=minioadmin
 export MINIO_ROOT_PASSWORD=minioadmin
 minio server "$MINIO_DATA" --console-address ":9001" --address ":9000" > "$LOG_DIR/minio.log" 2>&1 &
 
-# Wait for MinIO to be ready
 for i in $(seq 1 10); do
     if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
         echo "MinIO ready."
@@ -151,26 +102,13 @@ for i in $(seq 1 10); do
 done
 
 # ----------------------------------------
-# 5. Install Python dependencies
+# 4. Activate venv
 # ----------------------------------------
-echo "Setting up Python dependencies..."
-
-# Go back to the app code directory
 cd "$SCRIPT_DIR"
-echo "Working directory: $(pwd)"
-
-# Create venv with Python 3.12 and install deps with uv
-VENV_DIR="$DATA_DIR/venv"
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating Python 3.12 virtual environment..."
-    uv venv --python python3.12 "$VENV_DIR"
-fi
 source "$VENV_DIR/bin/activate"
-echo "Installing Python dependencies..."
-uv pip install --no-cache -r requirements.txt
 
 # ----------------------------------------
-# 6. Set environment variables
+# 5. Environment variables
 # ----------------------------------------
 export DATABASE_URL="postgresql+asyncpg://nosara:nosara@localhost:5432/nosara"
 export MINIO_ENDPOINT="localhost:9000"
@@ -182,7 +120,7 @@ export JWT_SECRET="${JWT_SECRET:-nosara-secret-change-in-prod}"
 export CORS_ORIGINS='["*"]'
 
 # ----------------------------------------
-# 7. Run database migrations
+# 6. Database migrations
 # ----------------------------------------
 echo "Running database migrations..."
 if ! alembic upgrade head 2>&1; then
@@ -196,9 +134,8 @@ if ! alembic upgrade head 2>&1; then
 fi
 
 # ----------------------------------------
-# 8. Start FastAPI
+# 7. FastAPI
 # ----------------------------------------
-# Kill any uvicorn left over from a previous run so :8000 is free
 lsof -ti :8000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 echo ""
