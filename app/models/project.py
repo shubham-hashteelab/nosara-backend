@@ -26,5 +26,7 @@ class Project(Base):
     )
 
     buildings: Mapped[list["Building"]] = relationship(  # noqa: F821
-        back_populates="project", cascade="all, delete-orphan"
+        back_populates="project",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )

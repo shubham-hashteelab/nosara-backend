@@ -48,16 +48,24 @@ class InspectionEntry(Base):
     flat = relationship("Flat", back_populates="inspection_entries")
     inspector = relationship("User")
     images: Mapped[list["SnagImage"]] = relationship(
-        back_populates="inspection_entry", cascade="all, delete-orphan"
+        back_populates="inspection_entry",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     voice_notes: Mapped[list["VoiceNote"]] = relationship(
-        back_populates="inspection_entry", cascade="all, delete-orphan"
+        back_populates="inspection_entry",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     videos: Mapped[list["InspectionVideo"]] = relationship(
-        back_populates="inspection_entry", cascade="all, delete-orphan"
+        back_populates="inspection_entry",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     contractor_assignments: Mapped[list["SnagContractorAssignment"]] = relationship(  # noqa: F821
-        back_populates="inspection_entry", cascade="all, delete-orphan"
+        back_populates="inspection_entry",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
@@ -123,7 +131,9 @@ class InspectionVideo(Base):
 
     inspection_entry = relationship("InspectionEntry", back_populates="videos")
     frame_analyses: Mapped[list["VideoFrameAnalysis"]] = relationship(
-        back_populates="video", cascade="all, delete-orphan"
+        back_populates="video",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 

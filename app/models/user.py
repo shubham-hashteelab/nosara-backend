@@ -29,13 +29,19 @@ class User(Base):
     )
 
     project_assignments: Mapped[list["UserProjectAssignment"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     building_assignments: Mapped[list["UserBuildingAssignment"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     flat_assignments: Mapped[list["UserFlatAssignment"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 

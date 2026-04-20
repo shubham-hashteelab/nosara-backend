@@ -31,5 +31,7 @@ class Floor(Base):
 
     building = relationship("Building", back_populates="floors")
     flats: Mapped[list["Flat"]] = relationship(  # noqa: F821
-        back_populates="floor", cascade="all, delete-orphan"
+        back_populates="floor",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
