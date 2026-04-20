@@ -70,6 +70,192 @@ def _load_assignments():
     ]
 
 
+# ---------------------------------------------------------------------------
+# Exclusive-assignment helpers
+#
+# Policy: a flat/building/project is owned by at most one inspector at the
+# same assignment level. Higher-level grants still implicitly extend scope
+# to lower levels (a tower assignment still covers its flats), but direct
+# same-level co-ownership is disallowed unless the manager explicitly
+# opts in via ?force=true, which strips conflicts atomically.
+# ---------------------------------------------------------------------------
+
+async def _find_same_level_conflicts(
+    db: AsyncSession,
+    level: str,
+    entity_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> list[tuple[uuid.UUID, str]]:
+    """Return (user_id, full_name) pairs of OTHER users already assigned at
+    the same level for this entity."""
+    if level == "project":
+        q = (
+            select(UserProjectAssignment.user_id, User.full_name)
+            .join(User, User.id == UserProjectAssignment.user_id)
+            .where(
+                UserProjectAssignment.project_id == entity_id,
+                UserProjectAssignment.user_id != user_id,
+            )
+        )
+    elif level == "building":
+        q = (
+            select(UserBuildingAssignment.user_id, User.full_name)
+            .join(User, User.id == UserBuildingAssignment.user_id)
+            .where(
+                UserBuildingAssignment.building_id == entity_id,
+                UserBuildingAssignment.user_id != user_id,
+            )
+        )
+    elif level == "flat":
+        q = (
+            select(UserFlatAssignment.user_id, User.full_name)
+            .join(User, User.id == UserFlatAssignment.user_id)
+            .where(
+                UserFlatAssignment.flat_id == entity_id,
+                UserFlatAssignment.user_id != user_id,
+            )
+        )
+    else:
+        raise ValueError(f"Unknown level: {level}")
+
+    rows = (await db.execute(q)).all()
+    return [(r.user_id, r.full_name) for r in rows]
+
+
+async def _cascade_strip_other_users(
+    db: AsyncSession,
+    level: str,
+    entity_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> list[dict]:
+    """Strip same-level other-user conflicts AND cascade-strip lower-level
+    direct assignments from other users inside this scope.
+
+    Project-level strip removes other users' direct building and flat
+    assignments inside the project. Building-level strip removes other
+    users' direct flat assignments inside the building. Flat-level strip
+    only removes same-level conflicts (leaf).
+
+    Adds objects to the session for deletion; caller must commit. Returns a
+    list of removed-assignment dicts for SSE notifications and the
+    client-visible summary."""
+    removed: list[dict] = []
+
+    async def _drop_project_assignments_in(project_id: uuid.UUID) -> None:
+        rows = (
+            await db.execute(
+                select(UserProjectAssignment, User.full_name)
+                .join(User, User.id == UserProjectAssignment.user_id)
+                .where(
+                    UserProjectAssignment.project_id == project_id,
+                    UserProjectAssignment.user_id != user_id,
+                )
+            )
+        ).all()
+        for assignment, name in rows:
+            removed.append({
+                "user_id": assignment.user_id,
+                "user_name": name,
+                "level": "project",
+                "entity_id": assignment.project_id,
+            })
+            await db.delete(assignment)
+
+    async def _drop_direct_buildings_in(project_id: uuid.UUID | None,
+                                         building_id: uuid.UUID | None) -> None:
+        q = (
+            select(UserBuildingAssignment, User.full_name)
+            .join(User, User.id == UserBuildingAssignment.user_id)
+            .join(Building, Building.id == UserBuildingAssignment.building_id)
+            .where(UserBuildingAssignment.user_id != user_id)
+        )
+        if project_id is not None:
+            q = q.where(Building.project_id == project_id)
+        if building_id is not None:
+            q = q.where(Building.id == building_id)
+        rows = (await db.execute(q)).all()
+        for assignment, name in rows:
+            removed.append({
+                "user_id": assignment.user_id,
+                "user_name": name,
+                "level": "building",
+                "entity_id": assignment.building_id,
+            })
+            await db.delete(assignment)
+
+    async def _drop_direct_flats_in(project_id: uuid.UUID | None,
+                                     building_id: uuid.UUID | None,
+                                     flat_id: uuid.UUID | None) -> None:
+        q = (
+            select(UserFlatAssignment, User.full_name)
+            .join(User, User.id == UserFlatAssignment.user_id)
+            .join(Flat, Flat.id == UserFlatAssignment.flat_id)
+            .join(Floor, Floor.id == Flat.floor_id)
+            .join(Building, Building.id == Floor.building_id)
+            .where(UserFlatAssignment.user_id != user_id)
+        )
+        if project_id is not None:
+            q = q.where(Building.project_id == project_id)
+        if building_id is not None:
+            q = q.where(Floor.building_id == building_id)
+        if flat_id is not None:
+            q = q.where(Flat.id == flat_id)
+        rows = (await db.execute(q)).all()
+        for assignment, name in rows:
+            removed.append({
+                "user_id": assignment.user_id,
+                "user_name": name,
+                "level": "flat",
+                "entity_id": assignment.flat_id,
+            })
+            await db.delete(assignment)
+
+    if level == "project":
+        await _drop_project_assignments_in(entity_id)
+        await _drop_direct_buildings_in(project_id=entity_id, building_id=None)
+        await _drop_direct_flats_in(project_id=entity_id, building_id=None, flat_id=None)
+    elif level == "building":
+        # Same-level: other users' building assignments on this building
+        await _drop_direct_buildings_in(project_id=None, building_id=entity_id)
+        # Cascade: other users' direct flat assignments inside this building
+        await _drop_direct_flats_in(project_id=None, building_id=entity_id, flat_id=None)
+    elif level == "flat":
+        await _drop_direct_flats_in(project_id=None, building_id=None, flat_id=entity_id)
+    else:
+        raise ValueError(f"Unknown level: {level}")
+
+    return removed
+
+
+def _conflicts_to_http_detail(
+    level: str, conflicts: list[tuple[uuid.UUID, str]]
+) -> dict:
+    """Structured 409 body the portal can read to show a reassign prompt."""
+    return {
+        "code": "EXCLUSIVE_CONFLICT",
+        "level": level,
+        "message": (
+            f"Another inspector is already assigned at the {level} level. "
+            "Retry with ?force=true to reassign."
+        ),
+        "conflicts": [
+            {"user_id": str(uid), "full_name": name} for uid, name in conflicts
+        ],
+    }
+
+
+def _removed_to_response(removed: list[dict]) -> list[dict]:
+    return [
+        {
+            "user_id": str(r["user_id"]),
+            "user_name": r["user_name"],
+            "level": r["level"],
+            "entity_id": str(r["entity_id"]),
+        }
+        for r in removed
+    ]
+
+
 @router.get("", response_model=list[UserResponse])
 async def list_users(
     _manager: Annotated[User, Depends(require_manager)],
@@ -315,6 +501,7 @@ async def assign_project(
     project_id: uuid.UUID,
     _manager: Annotated[User, Depends(require_manager)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
 ) -> dict:
     user_result = await db.execute(select(User).where(User.id == user_id))
     if not user_result.scalars().first():
@@ -336,11 +523,35 @@ async def assign_project(
             detail="Assignment already exists",
         )
 
-    assignment = UserProjectAssignment(user_id=user_id, project_id=project_id)
-    db.add(assignment)
+    if not force:
+        conflicts = await _find_same_level_conflicts(
+            db, "project", project_id, user_id
+        )
+        if conflicts:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_conflicts_to_http_detail("project", conflicts),
+            )
+
+    removed: list[dict] = []
+    if force:
+        removed = await _cascade_strip_other_users(
+            db, "project", project_id, user_id
+        )
+
+    db.add(UserProjectAssignment(user_id=user_id, project_id=project_id))
     await db.commit()
+
+    for r in removed:
+        await _notify_assignment_changed(
+            r["user_id"], "unassigned", r["level"], r["entity_id"]
+        )
     await _notify_assignment_changed(user_id, "assigned", "project", project_id)
-    return {"detail": "Project assigned"}
+
+    return {
+        "detail": "Project assigned",
+        "unassigned": _removed_to_response(removed),
+    }
 
 
 @router.delete("/{user_id}/assign-project/{project_id}")
@@ -379,6 +590,7 @@ async def assign_building(
     building_id: uuid.UUID,
     _manager: Annotated[User, Depends(require_manager)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
 ) -> dict:
     user_result = await db.execute(select(User).where(User.id == user_id))
     if not user_result.scalars().first():
@@ -400,11 +612,35 @@ async def assign_building(
             detail="Assignment already exists",
         )
 
-    assignment = UserBuildingAssignment(user_id=user_id, building_id=building_id)
-    db.add(assignment)
+    if not force:
+        conflicts = await _find_same_level_conflicts(
+            db, "building", building_id, user_id
+        )
+        if conflicts:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_conflicts_to_http_detail("building", conflicts),
+            )
+
+    removed: list[dict] = []
+    if force:
+        removed = await _cascade_strip_other_users(
+            db, "building", building_id, user_id
+        )
+
+    db.add(UserBuildingAssignment(user_id=user_id, building_id=building_id))
     await db.commit()
+
+    for r in removed:
+        await _notify_assignment_changed(
+            r["user_id"], "unassigned", r["level"], r["entity_id"]
+        )
     await _notify_assignment_changed(user_id, "assigned", "building", building_id)
-    return {"detail": "Building assigned"}
+
+    return {
+        "detail": "Building assigned",
+        "unassigned": _removed_to_response(removed),
+    }
 
 
 @router.delete("/{user_id}/assign-building/{building_id}")
@@ -443,6 +679,7 @@ async def assign_flat(
     flat_id: uuid.UUID,
     _manager: Annotated[User, Depends(require_manager)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
 ) -> dict:
     user_result = await db.execute(select(User).where(User.id == user_id))
     if not user_result.scalars().first():
@@ -464,11 +701,35 @@ async def assign_flat(
             detail="Assignment already exists",
         )
 
-    assignment = UserFlatAssignment(user_id=user_id, flat_id=flat_id)
-    db.add(assignment)
+    if not force:
+        conflicts = await _find_same_level_conflicts(
+            db, "flat", flat_id, user_id
+        )
+        if conflicts:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_conflicts_to_http_detail("flat", conflicts),
+            )
+
+    removed: list[dict] = []
+    if force:
+        removed = await _cascade_strip_other_users(
+            db, "flat", flat_id, user_id
+        )
+
+    db.add(UserFlatAssignment(user_id=user_id, flat_id=flat_id))
     await db.commit()
+
+    for r in removed:
+        await _notify_assignment_changed(
+            r["user_id"], "unassigned", r["level"], r["entity_id"]
+        )
     await _notify_assignment_changed(user_id, "assigned", "flat", flat_id)
-    return {"detail": "Flat assigned"}
+
+    return {
+        "detail": "Flat assigned",
+        "unassigned": _removed_to_response(removed),
+    }
 
 
 @router.delete("/{user_id}/assign-flat/{flat_id}")
