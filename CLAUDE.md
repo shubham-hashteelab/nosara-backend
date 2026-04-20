@@ -30,6 +30,7 @@ Snagging inspection system for real estate handover. Three repos, one backend:
 - **Backend URL is dynamic** — RunPod assigns a new proxy URL each pod restart. Clients store URL at runtime.
 - **Default creds:** `admin` / `admin123` (created on first startup).
 - **Sync push `data` dict must never contain `id`** — the `process_push` UPDATE loop skips `id` to prevent PK overwrite crashes.
+- **"Business Associate" = Contractor (portal UI label only).** As of 2026-04-20 the portal renders this entity as "Business Associate" in user-visible text. Backend code, tables (`contractors`, `snag_contractor_assignments`), columns (`contractor_id`), models (`Contractor`, `SnagContractorAssignment`), schemas, endpoints (`/api/v1/contractors`, `/api/v1/entries/{id}/assign-contractor/{contractor_id}`), and sync protocol keys all still use `contractor`. Do NOT rename any of this — it's a pure portal UI rename, coordinated rename would need Alembic migration + Android Room migration + portal type updates shipped together.
 
 ## Project Structure
 
