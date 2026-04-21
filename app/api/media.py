@@ -22,8 +22,15 @@ async def upload_file(
     inspection_entry_id: Annotated[str, Form()],
     _user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    duration_ms: Annotated[str | None, Form()] = None,
 ) -> FileUploadResponse:
     entry_uuid = uuid.UUID(inspection_entry_id)
+    duration_int = 0
+    if duration_ms is not None and duration_ms.strip():
+        try:
+            duration_int = int(float(duration_ms))
+        except ValueError:
+            duration_int = 0
 
     # Validate entry exists
     result = await db.execute(
@@ -63,7 +70,7 @@ async def upload_file(
         record = VoiceNote(
             inspection_entry_id=entry_uuid,
             minio_key=minio_key,
-            duration_ms=0,  # Client should update this
+            duration_ms=duration_int,
         )
         db.add(record)
         await db.commit()
@@ -73,7 +80,7 @@ async def upload_file(
         record = InspectionVideo(
             inspection_entry_id=entry_uuid,
             minio_key=minio_key,
-            duration_ms=0,  # Client should update this
+            duration_ms=duration_int,
         )
         db.add(record)
         await db.commit()

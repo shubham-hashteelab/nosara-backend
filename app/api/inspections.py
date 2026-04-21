@@ -1,13 +1,15 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user, get_db
+from app.models.building import Building
 from app.models.flat import Flat
+from app.models.floor import Floor
 from app.models.inspection import InspectionEntry
 from app.models.user import User
 from app.schemas.inspection import (
@@ -21,6 +23,54 @@ from app.services.inspection_service import (
 )
 
 router = APIRouter(tags=["inspections"])
+
+
+@router.get("/entries/snags", response_model=list[InspectionEntryResponse])
+async def list_snag_entries(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    project_id: Annotated[uuid.UUID | None, Query()] = None,
+    severity: Annotated[str | None, Query()] = None,
+    category: Annotated[str | None, Query()] = None,
+    snag_fix_status: Annotated[str | None, Query()] = None,
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> list[InspectionEntryResponse]:
+    """
+    Cross-project list of snag entries (status == 'FAIL') with optional filters.
+    Powers the portal's Inspections page.
+    """
+    stmt = (
+        select(InspectionEntry)
+        .options(
+            selectinload(InspectionEntry.images),
+            selectinload(InspectionEntry.voice_notes),
+            selectinload(InspectionEntry.videos),
+        )
+        .where(InspectionEntry.status == "FAIL")
+    )
+
+    # Filtering by project requires joining through flat → floor → building.
+    if project_id is not None:
+        stmt = (
+            stmt.join(Flat, Flat.id == InspectionEntry.flat_id)
+            .join(Floor, Floor.id == Flat.floor_id)
+            .join(Building, Building.id == Floor.building_id)
+            .where(Building.project_id == project_id)
+        )
+
+    if severity:
+        stmt = stmt.where(InspectionEntry.severity == severity)
+    if category:
+        stmt = stmt.where(InspectionEntry.category == category)
+    if snag_fix_status:
+        stmt = stmt.where(InspectionEntry.snag_fix_status == snag_fix_status)
+
+    stmt = stmt.order_by(InspectionEntry.updated_at.desc()).offset(skip).limit(limit)
+
+    result = await db.execute(stmt)
+    entries = result.scalars().all()
+    return [InspectionEntryResponse.model_validate(e) for e in entries]
 
 
 @router.get(

@@ -133,7 +133,7 @@ async def project_stats(
         .join(Building, Building.id == Floor.building_id)
         .where(
             Building.project_id == project_id,
-            InspectionEntry.status == "SNAG",
+            InspectionEntry.status == "FAIL",
         )
     )
     snag_row = snag_stats.one()
@@ -149,7 +149,7 @@ async def project_stats(
         .join(Building, Building.id == Floor.building_id)
         .where(
             Building.project_id == project_id,
-            InspectionEntry.status == "SNAG",
+            InspectionEntry.status == "FAIL",
         )
         .group_by(InspectionEntry.room_label)
     )
@@ -205,10 +205,10 @@ async def building_stats(
         select(
             func.count(InspectionEntry.id).label("total"),
             func.count(
-                case((InspectionEntry.status == "SNAG", InspectionEntry.id))
+                case((InspectionEntry.status == "FAIL", InspectionEntry.id))
             ).label("snag_count"),
             func.count(
-                case((InspectionEntry.status == "OK", InspectionEntry.id))
+                case((InspectionEntry.status == "PASS", InspectionEntry.id))
             ).label("ok_count"),
             func.count(
                 case((InspectionEntry.status == "NA", InspectionEntry.id))
@@ -254,7 +254,7 @@ async def inspector_activity(
             day_bucket,
             func.count(InspectionEntry.id).label("entries_checked"),
             func.count(
-                case((InspectionEntry.status == "SNAG", InspectionEntry.id))
+                case((InspectionEntry.status == "FAIL", InspectionEntry.id))
             ).label("snags_found"),
         )
         .join(InspectionEntry, InspectionEntry.inspector_id == User.id)
@@ -334,7 +334,7 @@ async def project_building_stats(
         .join(InspectionEntry, InspectionEntry.flat_id == Flat.id)
         .where(
             Building.project_id == project_id,
-            InspectionEntry.status == "SNAG",
+            InspectionEntry.status == "FAIL",
         )
         .group_by(Building.id)
     )
@@ -425,7 +425,7 @@ async def tower_stats(
             .join(Building, Building.id == Floor.building_id)
             .where(
                 Building.project_id == project_id,
-                InspectionEntry.status == "SNAG",
+                InspectionEntry.status == "FAIL",
                 InspectionEntry.snag_fix_status == "OPEN",
             )
             .group_by(Floor.id)
@@ -463,7 +463,7 @@ async def tower_stats(
             .join(InspectionEntry, InspectionEntry.flat_id == Flat.id)
             .where(
                 Building.project_id == project_id,
-                InspectionEntry.status == "SNAG",
+                InspectionEntry.status == "FAIL",
             )
             .group_by(Building.id)
         )

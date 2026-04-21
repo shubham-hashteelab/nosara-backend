@@ -77,6 +77,7 @@ async def sync_upload_file(
     client_id: Annotated[str, Form()],
     _user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    duration_ms: Annotated[str | None, Form()] = None,
 ) -> dict:
     """
     Upload a media file during sync and create the corresponding DB record.
@@ -86,9 +87,18 @@ async def sync_upload_file(
     - type: "snag_image", "voice_note", or "inspection_video"
     - inspection_entry_id: UUID of the parent inspection entry
     - client_id: UUID generated client-side (used as the DB record ID)
+    - duration_ms: optional, required for voice_note and inspection_video
     """
     entry_uuid = uuid.UUID(inspection_entry_id)
     record_id = uuid.UUID(client_id)
+    # Parse duration_ms as int. Invalid strings fall back to 0 so a malformed
+    # client doesn't abort the upload entirely — the file still lands.
+    duration_int = 0
+    if duration_ms is not None and duration_ms.strip():
+        try:
+            duration_int = int(float(duration_ms))
+        except ValueError:
+            duration_int = 0
 
     file_bytes = await file.read()
     content_type = file.content_type or "application/octet-stream"
@@ -121,7 +131,7 @@ async def sync_upload_file(
             id=record_id,
             inspection_entry_id=entry_uuid,
             minio_key=minio_key,
-            duration_ms=0,  # App should update this via sync push if needed
+            duration_ms=duration_int,
         )
         db.add(record)
     elif type == "inspection_video":
@@ -129,7 +139,7 @@ async def sync_upload_file(
             id=record_id,
             inspection_entry_id=entry_uuid,
             minio_key=minio_key,
-            duration_ms=0,
+            duration_ms=duration_int,
         )
         db.add(record)
     else:

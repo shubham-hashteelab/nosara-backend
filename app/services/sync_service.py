@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -45,76 +45,83 @@ class SyncService:
         rejected: list[SyncRejection] = []
 
         for op in operations:
+            # SAVEPOINT per operation. A DB-level failure (FK violation, lock
+            # timeout, etc.) on one op rolls back only that op's work, leaving
+            # the outer transaction intact so prior ops aren't lost and later
+            # ops still run. Without this, any flush error put the whole
+            # session into a rolled-back state and the final commit dropped
+            # every op — while the client had already counted them accepted.
             try:
-                model = ENTITY_MODEL_MAP.get(op.entity_type)
-                if model is None:
-                    rejected.append(
-                        SyncRejection(id=op.entity_id, reason=f"Unknown entity type: {op.entity_type}")
-                    )
-                    continue
-
-                if op.operation == "CREATE":
-                    # Idempotent by primary key
-                    existing = await db.execute(select(model).where(model.id == op.entity_id))
-                    if existing.scalars().first() is not None:
-                        accepted.append(str(op.entity_id))
+                async with db.begin_nested():
+                    model = ENTITY_MODEL_MAP.get(op.entity_type)
+                    if model is None:
+                        rejected.append(
+                            SyncRejection(id=op.entity_id, reason=f"Unknown entity type: {op.entity_type}")
+                        )
                         continue
 
-                    data = dict(op.data)
-                    data["id"] = op.entity_id
-                    if op.entity_type == "inspection_entry":
-                        data["inspector_id"] = inspector_id
-                        # Also idempotent by content — prevents duplicates when
-                        # the app queued a CREATE for a flat that the backend
-                        # auto-initialized independently. Without this check the
-                        # unique index on (flat_id, room_label, category, item_name)
-                        # would 409 at flush and abort the whole push transaction.
-                        content_dup = await db.execute(
-                            select(InspectionEntry).where(
-                                InspectionEntry.flat_id == data.get("flat_id"),
-                                InspectionEntry.room_label == data.get("room_label"),
-                                InspectionEntry.category == data.get("category"),
-                                InspectionEntry.item_name == data.get("item_name"),
-                            )
-                        )
-                        if content_dup.scalars().first() is not None:
+                    if op.operation == "CREATE":
+                        # Idempotent by primary key
+                        existing = await db.execute(select(model).where(model.id == op.entity_id))
+                        if existing.scalars().first() is not None:
                             accepted.append(str(op.entity_id))
                             continue
-                    obj = model(**data)
-                    db.add(obj)
-                    await db.flush()
-                    accepted.append(str(op.entity_id))
 
-                elif op.operation == "UPDATE":
-                    result = await db.execute(select(model).where(model.id == op.entity_id))
-                    obj = result.scalars().first()
-                    if obj is None:
-                        rejected.append(SyncRejection(id=op.entity_id, reason=f"{op.entity_type} not found"))
-                        continue
-                    for key, value in op.data.items():
-                        if key == "id":
-                            continue  # Never overwrite primary key
-                        if hasattr(obj, key):
-                            setattr(obj, key, value)
-                    await db.flush()
+                        data = dict(op.data)
+                        data["id"] = op.entity_id
+                        if op.entity_type == "inspection_entry":
+                            data["inspector_id"] = inspector_id
+                            # Also idempotent by content — prevents duplicates when
+                            # the app queued a CREATE for a flat that the backend
+                            # auto-initialized independently. Without this check the
+                            # unique index on (flat_id, room_label, category, item_name)
+                            # would 409 at flush and abort the whole push transaction.
+                            content_dup = await db.execute(
+                                select(InspectionEntry).where(
+                                    InspectionEntry.flat_id == data.get("flat_id"),
+                                    InspectionEntry.room_label == data.get("room_label"),
+                                    InspectionEntry.category == data.get("category"),
+                                    InspectionEntry.item_name == data.get("item_name"),
+                                )
+                            )
+                            if content_dup.scalars().first() is not None:
+                                accepted.append(str(op.entity_id))
+                                continue
+                        obj = model(**data)
+                        db.add(obj)
+                        await db.flush()
+                        accepted.append(str(op.entity_id))
 
-                    # Recompute flat status when an entry's check status changes
-                    if op.entity_type == "inspection_entry" and "status" in op.data:
-                        await recompute_flat_inspection_status(obj.flat_id, db)
+                    elif op.operation == "UPDATE":
+                        result = await db.execute(select(model).where(model.id == op.entity_id))
+                        obj = result.scalars().first()
+                        if obj is None:
+                            rejected.append(SyncRejection(id=op.entity_id, reason=f"{op.entity_type} not found"))
+                            continue
+                        for key, value in op.data.items():
+                            if key == "id":
+                                continue  # Never overwrite primary key
+                            if hasattr(obj, key):
+                                setattr(obj, key, value)
                         await db.flush()
 
-                    accepted.append(str(op.entity_id))
+                        # Recompute flat status when an entry's check status changes
+                        if op.entity_type == "inspection_entry" and "status" in op.data:
+                            await recompute_flat_inspection_status(obj.flat_id, db)
+                            await db.flush()
 
-                elif op.operation == "DELETE":
-                    result = await db.execute(select(model).where(model.id == op.entity_id))
-                    obj = result.scalars().first()
-                    if obj:
-                        await db.delete(obj)
-                        await db.flush()
-                    accepted.append(str(op.entity_id))
+                        accepted.append(str(op.entity_id))
 
-                else:
-                    rejected.append(SyncRejection(id=op.entity_id, reason=f"Unknown operation: {op.operation}"))
+                    elif op.operation == "DELETE":
+                        result = await db.execute(select(model).where(model.id == op.entity_id))
+                        obj = result.scalars().first()
+                        if obj:
+                            await db.delete(obj)
+                            await db.flush()
+                        accepted.append(str(op.entity_id))
+
+                    else:
+                        rejected.append(SyncRejection(id=op.entity_id, reason=f"Unknown operation: {op.operation}"))
 
             except Exception as exc:
                 logger.error("Sync push error for %s %s: %s", op.entity_type, op.entity_id, exc)
@@ -239,6 +246,26 @@ class SyncService:
             "flat_ids": all_flat_ids,
         }
 
+    async def _assignments_changed_since(
+        self,
+        user_id: uuid.UUID,
+        last_synced_at: datetime,
+        db: AsyncSession,
+    ) -> bool:
+        """
+        True if any of the user's project/building/flat assignments were granted
+        after [last_synced_at]. We rely on `assigned_at` as the signal: new
+        assignments carry a fresh timestamp, so this answers "did scope grow
+        since the last pull?" without needing an explicit audit trail.
+        """
+        for model in (UserProjectAssignment, UserBuildingAssignment, UserFlatAssignment):
+            latest = await db.scalar(
+                select(func.max(model.assigned_at)).where(model.user_id == user_id)
+            )
+            if latest is not None and latest > last_synced_at:
+                return True
+        return False
+
     async def process_pull(
         self,
         last_synced_at: datetime,
@@ -253,56 +280,61 @@ class SyncService:
         floor_ids = scope["floor_ids"]
         flat_ids = scope["flat_ids"]
 
+        # If the user's assignment set changed since last sync, deliver the
+        # full hierarchy even when parent rows (project/building/floor) and
+        # their descendant flats/entries weren't individually touched. Parents
+        # derived via new assignments have old `updated_at` values and would
+        # otherwise be stripped by the delta filter — leaving them in
+        # scope_snapshot but missing from the data, which breaks navigation.
+        include_full_hierarchy = await self._assignments_changed_since(
+            user_id, last_synced_at, db
+        )
+
         # Projects
         if project_ids:
-            projects_q = await db.execute(
-                select(Project).where(
-                    Project.updated_at >= last_synced_at,
-                    Project.id.in_(project_ids),
-                )
-            )
+            proj_filters = [Project.id.in_(project_ids)]
+            if not include_full_hierarchy:
+                proj_filters.append(Project.updated_at >= last_synced_at)
+            projects_q = await db.execute(select(Project).where(*proj_filters))
         else:
             projects_q = await db.execute(select(Project).where(False))
         projects = projects_q.scalars().all()
 
         # Buildings
         if building_ids:
-            buildings_q = await db.execute(
-                select(Building).where(
-                    Building.updated_at >= last_synced_at,
-                    Building.id.in_(building_ids),
-                )
-            )
+            bldg_filters = [Building.id.in_(building_ids)]
+            if not include_full_hierarchy:
+                bldg_filters.append(Building.updated_at >= last_synced_at)
+            buildings_q = await db.execute(select(Building).where(*bldg_filters))
         else:
             buildings_q = await db.execute(select(Building).where(False))
         buildings = buildings_q.scalars().all()
 
         # Floors
         if floor_ids:
-            floors_q = await db.execute(
-                select(Floor).where(
-                    Floor.updated_at >= last_synced_at,
-                    Floor.id.in_(floor_ids),
-                )
-            )
+            floor_filters = [Floor.id.in_(floor_ids)]
+            if not include_full_hierarchy:
+                floor_filters.append(Floor.updated_at >= last_synced_at)
+            floors_q = await db.execute(select(Floor).where(*floor_filters))
         else:
             floors_q = await db.execute(select(Floor).where(False))
         floors = floors_q.scalars().all()
 
         # Flats
         if flat_ids:
-            flats_q = await db.execute(
-                select(Flat).where(
-                    Flat.updated_at >= last_synced_at,
-                    Flat.id.in_(flat_ids),
-                )
-            )
+            flat_filters = [Flat.id.in_(flat_ids)]
+            if not include_full_hierarchy:
+                flat_filters.append(Flat.updated_at >= last_synced_at)
+            flats_q = await db.execute(select(Flat).where(*flat_filters))
         else:
             flats_q = await db.execute(select(Flat).where(False))
         flats = flats_q.scalars().all()
 
         # Inspection entries for accessible flats
         if flat_ids:
+            entry_filters = [InspectionEntry.flat_id.in_(flat_ids)]
+            if not include_full_hierarchy:
+                entry_filters.append(InspectionEntry.updated_at >= last_synced_at)
             entries_q = await db.execute(
                 select(InspectionEntry)
                 .options(
@@ -310,10 +342,7 @@ class SyncService:
                     selectinload(InspectionEntry.voice_notes),
                     selectinload(InspectionEntry.videos),
                 )
-                .where(
-                    InspectionEntry.updated_at >= last_synced_at,
-                    InspectionEntry.flat_id.in_(flat_ids),
-                )
+                .where(*entry_filters)
             )
         else:
             entries_q = await db.execute(select(InspectionEntry).where(False))

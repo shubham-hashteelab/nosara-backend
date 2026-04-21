@@ -30,6 +30,7 @@ Snagging inspection system for real estate handover. Three repos, one backend:
 - **Backend URL is dynamic** — RunPod assigns a new proxy URL each pod restart. Clients store URL at runtime.
 - **Default creds:** `admin` / `admin123` (created on first startup).
 - **Sync push `data` dict must never contain `id`** — the `process_push` UPDATE loop skips `id` to prevent PK overwrite crashes.
+- **Inspection entry `status` values: `"PASS"` / `"FAIL"` / `"NA"`** (string column, no PG enum). Dashboard snag aggregates filter on `status == "FAIL"`; a previous revision used `"SNAG"`/`"OK"` which never matched any row — do not resurrect those literals.
 - **"Business Associate" = Contractor (portal UI label only).** As of 2026-04-20 the portal renders this entity as "Business Associate" in user-visible text. Backend code, tables (`contractors`, `snag_contractor_assignments`), columns (`contractor_id`), models (`Contractor`, `SnagContractorAssignment`), schemas, endpoints (`/api/v1/contractors`, `/api/v1/entries/{id}/assign-contractor/{contractor_id}`), and sync protocol keys all still use `contractor`. Do NOT rename any of this — it's a pure portal UI rename, coordinated rename would need Alembic migration + Android Room migration + portal type updates shipped together.
 
 ## Project Structure
@@ -64,8 +65,9 @@ alembic/                 # DB migrations
   - `GET/POST /floors/{id}/flats`, `GET/PATCH/DELETE /flats/{id}`
 - **Inspections:**
   - `GET /flats/{id}/entries`, `GET/PATCH /entries/{id}`
+  - `GET /entries/snags` — cross-project list of snag entries (`status == "FAIL"`). Query params: `project_id`, `severity`, `category`, `snag_fix_status`, `skip`, `limit` (1–500, default 200). Powers the portal's Inspections page. Ordered by `updated_at DESC`.
   - `POST /entries/{flatId}/initialize-checklist` — legacy idempotent fallback. Flats now auto-initialize on creation, so this endpoint is rarely called. Returns existing entries if already initialized, otherwise instantiates from templates.
-- **Media:** `POST /files/upload`, `GET /files/{key}?token=JWT` (proxied to/from MinIO, auth via query param for img/audio/video tags)
+- **Media:** `POST /files/upload` (accepts optional `duration_ms` form field for voice/video), `GET /files/{key}?token=JWT` (proxied to/from MinIO, auth via query param for img/audio/video tags)
 - **AI:** `POST /ai/describe-snag` (proxied to vLLM)
 - **Sync:** `POST /sync/pull` (accepts ISO8601 or epoch), `POST /sync/push`, `POST /sync/upload-file`
 - **Users:** CRUD + granular assignment:
@@ -99,8 +101,9 @@ The scope resolver unions all three levels. Building-only assignments auto-inclu
 
 - **Pull:** `_resolve_scope()` computes accessible project/building/floor/flat IDs from all assignment levels. Returns only data within scope, filtered by `updated_at >= last_synced_at`. Always returns all `flat_type_rooms` and `floor_plan_layouts` (global, not time-filtered).
 - **`scope_snapshot` on every pull:** `SyncPullResponse.scope_snapshot` carries the complete set of IDs the user is currently entitled to — `{project_ids, building_ids, floor_ids, flat_ids}`. Serialized from the same `_resolve_scope()` output (no extra queries). The Android client diffs this against its local rows to prune anything that fell out of scope (e.g., a revoked assignment) without needing a full reset. This is how mid-session revocation propagates to the app on the next pull.
-- **Push:** Individual mutations from sync queue. `data` dict applied via `setattr` (skips `id` key). For `inspection_entry` CREATEs, `inspector_id` is auto-set. **CREATEs are idempotent** — if a record with the same ID already exists, it's accepted without inserting a duplicate.
-- **File upload:** `POST /sync/upload-file` accepts multipart with `file`, `type` (snag_image/voice_note/inspection_video), `inspection_entry_id`, `client_id`. Uploads to MinIO AND creates the DB record (SnagImage/VoiceNote/InspectionVideo) in one request. Returns `{ minio_key, size }`.
+- **Push:** Individual mutations from sync queue. `data` dict applied via `setattr` (skips `id` key). For `inspection_entry` CREATEs, `inspector_id` is auto-set. **CREATEs are idempotent** — if a record with the same ID already exists, it's accepted without inserting a duplicate. **Per-op SAVEPOINT** via `db.begin_nested()`: a DB-level failure on one op rolls back only that op, leaving prior-accepted ops and subsequent ops intact. Without this, any flush error would cascade on `db.commit()` and silently discard the entire batch while the client had already marked each op COMPLETED locally.
+- **File upload:** `POST /sync/upload-file` accepts multipart with `file`, `type` (snag_image/voice_note/inspection_video), `inspection_entry_id`, `client_id`, and optional `duration_ms` (for voice_note/inspection_video). Uploads to MinIO AND creates the DB record (SnagImage/VoiceNote/InspectionVideo) in one request. Returns `{ minio_key, size }`.
+- **Assignment change detection:** `_assignments_changed_since(user_id, last_synced_at)` checks `max(assigned_at)` across UserProject/Building/FlatAssignment. When true, `process_pull` drops the `updated_at >= last_synced_at` filter for Project/Building/Floor/Flat/InspectionEntry so newly-granted scope arrives in full — parent rows with stale `updated_at` would otherwise sit in `scope_snapshot` without any accompanying data and break navigation.
 - Computed response fields: `ProjectResponse` includes `total_buildings`, `total_flats`; `BuildingResponse` includes `total_floors`, `total_flats`; `FloorResponse` includes `total_flats`, `label`.
 
 ## Checklist Auto-Initialization
