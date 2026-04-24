@@ -1,4 +1,6 @@
+import random
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_db, require_manager
 from app.models.building import Building
 from app.models.checklist import ChecklistTemplate, FlatTypeRoom, FloorPlanLayout
+from app.models.contractor import SnagContractorAssignment
 from app.models.flat import Flat
 from app.models.floor import Floor
+from app.models.inspection import InspectionEntry
 from app.models.project import Project
 from app.models.user import User
 from app.schemas.checklist import (
@@ -430,6 +434,10 @@ async def seed_hierarchy(
         )
         demo_contractor_count += 1
 
+    # Flush so demo contractors have DB-assigned IDs before we assign them.
+    await db.flush()
+    demo_snag_stats = await _seed_demo_snags(db)
+
     await db.commit()
 
     return {
@@ -439,6 +447,112 @@ async def seed_hierarchy(
         "floors": floor_count,
         "flats": flat_count,
         "demo_contractors": demo_contractor_count,
+        **demo_snag_stats,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Demo snags — give the portal / Android something to interact with right
+# after seed. Per project we mark ~3 entries as FAIL across distinct trades:
+#   - 1 unassigned OPEN       (tests portal Assign flow)
+#   - 1 assigned OPEN         (tests Android contractor my-assigned list)
+#   - 1 assigned FIXED        (tests portal Verification Queue)
+# ---------------------------------------------------------------------------
+
+_DEMO_SEVERITIES = ["MINOR", "MAJOR", "CRITICAL"]
+
+
+async def _seed_demo_snags(db: AsyncSession) -> dict[str, int]:
+    """Create a mix of FAIL entries + contractor assignments for demo purposes."""
+    contractors_q = await db.execute(
+        select(User).where(User.role == "CONTRACTOR", User.is_active == True)  # noqa: E712
+    )
+    contractors = list(contractors_q.scalars().all())
+    if not contractors:
+        return {"demo_snags": 0, "demo_snag_assignments": 0, "demo_snags_fixed": 0}
+
+    # Trade -> list of matching contractors.
+    by_trade: dict[str, list[User]] = {}
+    for c in contractors:
+        for t in (c.trades or []):
+            by_trade.setdefault(t, []).append(c)
+
+    # All entries joined with their project id for per-project partitioning.
+    rows_q = await db.execute(
+        select(InspectionEntry, Building.project_id)
+        .join(Flat, InspectionEntry.flat_id == Flat.id)
+        .join(Floor, Flat.floor_id == Floor.id)
+        .join(Building, Floor.building_id == Building.id)
+    )
+    by_project: dict[uuid.UUID, list[InspectionEntry]] = {}
+    for entry, project_id in rows_q.all():
+        by_project.setdefault(project_id, []).append(entry)
+
+    rng = random.Random(42)  # deterministic so re-seeds look the same
+    snag_count = 0
+    assigned_count = 0
+    fixed_count = 0
+    affected_flats: set[uuid.UUID] = set()
+
+    for entries in by_project.values():
+        # Only entries whose trade has a matching contractor are candidates —
+        # otherwise the assignment flow has nothing sensible to route to.
+        candidates = [e for e in entries if e.trade in by_trade]
+        if not candidates:
+            continue
+
+        rng.shuffle(candidates)
+
+        # Pick up to 3 entries spread across distinct trades where possible.
+        picks: list[InspectionEntry] = []
+        seen_trades: set[str] = set()
+        for e in candidates:
+            if e.trade not in seen_trades:
+                picks.append(e)
+                seen_trades.add(e.trade)
+            if len(picks) == 3:
+                break
+
+        for i, entry in enumerate(picks):
+            entry.status = "FAIL"
+            entry.severity = rng.choice(_DEMO_SEVERITIES)
+            entry.notes = "Demo snag — seeded for testing the contractor flow."
+            affected_flats.add(entry.flat_id)
+            snag_count += 1
+
+            if i == 0:
+                # Leave unassigned — portal Assign flow target.
+                continue
+
+            contractor = by_trade[entry.trade][0]
+            db.add(
+                SnagContractorAssignment(
+                    inspection_entry_id=entry.id,
+                    contractor_id=contractor.id,
+                    notes="Demo assignment",
+                )
+            )
+            assigned_count += 1
+
+            if i == 2:
+                # Mark FIXED — populates the Verification Queue.
+                # We skip the ≥1 CLOSURE image precondition (that's enforced
+                # on the contractor's mark-fixed endpoint, not on manager
+                # verify/reject).
+                entry.snag_fix_status = "FIXED"
+                entry.fixed_at = datetime.now(timezone.utc)
+                entry.fixed_by_id = contractor.id
+                fixed_count += 1
+
+    # Flat status was computed as NOT_STARTED during init; changing entries
+    # to FAIL makes it IN_PROGRESS. Recompute the affected flats.
+    for flat_id in affected_flats:
+        await recompute_flat_inspection_status(flat_id, db)
+
+    return {
+        "demo_snags": snag_count,
+        "demo_snag_assignments": assigned_count,
+        "demo_snags_fixed": fixed_count,
     }
 
 
