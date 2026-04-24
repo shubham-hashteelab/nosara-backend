@@ -31,27 +31,40 @@ Snagging inspection system for real estate handover. Three repos, one backend:
 - **Default creds:** `admin` / `admin123` (created on first startup).
 - **Sync push `data` dict must never contain `id`** — the `process_push` UPDATE loop skips `id` to prevent PK overwrite crashes.
 - **Inspection entry `status` values: `"PASS"` / `"FAIL"` / `"NA"`** (string column, no PG enum). Dashboard snag aggregates filter on `status == "FAIL"`; a previous revision used `"SNAG"`/`"OK"` which never matched any row — do not resurrect those literals.
-- **"Business Associate" = Contractor (portal UI label only).** As of 2026-04-20 the portal renders this entity as "Business Associate" in user-visible text. Backend code, tables (`contractors`, `snag_contractor_assignments`), columns (`contractor_id`), models (`Contractor`, `SnagContractorAssignment`), schemas, endpoints (`/api/v1/contractors`, `/api/v1/entries/{id}/assign-contractor/{contractor_id}`), and sync protocol keys all still use `contractor`. Do NOT rename any of this — it's a pure portal UI rename, coordinated rename would need Alembic migration + Android Room migration + portal type updates shipped together.
+- **Three roles: `MANAGER` / `INSPECTOR` / `CONTRACTOR`** (string column on `users`, validated app-side). Contractors are full User rows (`role=CONTRACTOR`) with `company: text` and `trades: text[]` populated — the old standalone `contractors` table was dropped in migration 004. "Business Associate" is the portal's user-visible label for CONTRACTOR users. Only identifier columns / endpoints still say `contractor` (e.g., `snag_contractor_assignments.contractor_id` FK → `users.id`, `/entries/{id}/assign-contractor/{contractor_id}`).
+- **Trade taxonomy** — `PLUMBING`, `ELECTRICAL`, `PAINTING`, `CARPENTRY`, `TILING`, `CIVIL`, `HVAC`, `MISC`. Single source of truth: `app/constants/trades.py` (`VALID_TRADES`, `is_valid_trade`). Every `ChecklistTemplate` and `InspectionEntry` carries a `trade`; assignment routes enforce `entry.trade IN contractor.trades`.
+- **Snag image kinds** — `SnagImage.kind` is `"NC"` (original defect photo, inspector-uploaded) or `"CLOSURE"` (post-fix photo, contractor-uploaded). `/files/upload` and `/sync/upload-file` require `kind` on image uploads and role-gate it: INSPECTOR→NC, CONTRACTOR→CLOSURE, MANAGER→NC only (managers never upload closure proof — that's the contractor's evidence of work done).
+- **Auth deps** — `get_current_user` rejects CONTRACTOR tokens by default, so legacy inspector/manager routes remain contractor-safe without per-route guards. New `get_current_user_allow_all` accepts every active role; used only by routes that dispatch on role internally (`/sync/push`, `/sync/pull`, `/sync/upload-file`, `/files/upload`) or serve contractors via `require_contractor`. Same pattern: `require_manager`, `require_inspector`, `require_contractor`.
+- **Inspection fix-flow state machine** — `snag_fix_status`: `OPEN → FIXED` (via `/entries/{id}/mark-fixed` or CONTRACTOR sync push) → `VERIFIED` (via `/entries/{id}/verify`) or `OPEN` (via `/entries/{id}/reject`, clearing `fixed_at`/`fixed_by_id`, setting `rejection_remark`/`rejected_at`). `PATCH /entries/{id}` rejects any `snag_fix_status` change that isn't an idempotent no-op — all transitions must go through the dedicated endpoints so timeline columns stay consistent.
 
 ## Project Structure
 
 ```
 app/
-├── main.py              # FastAPI app, lifespan, CORS
+├── main.py              # FastAPI app, lifespan, CORS, router registration order
 ├── config.py            # pydantic-settings (env vars)
 ├── database.py          # async engine + session
+├── constants/
+│   └── trades.py        # VALID_TRADES, VALID_SNAG_IMAGE_KINDS, validators
 ├── models/              # SQLAlchemy ORM models
-│   └── user.py          # User, UserProjectAssignment, UserBuildingAssignment, UserFlatAssignment
+│   ├── user.py          # User (role, trades, company, email, phone) + assignment tables
+│   └── contractor.py    # SnagContractorAssignment only (Contractor class removed, contractors are now Users)
 ├── schemas/             # Pydantic request/response
 ├── api/                 # Route handlers
-│   ├── deps.py          # get_db, get_current_user, require_manager
-│   ├── users.py         # User CRUD + project/building/flat assignment endpoints
-│   ├── checklists.py    # Template CRUD + seed-defaults + seed-hierarchy
-│   └── sync.py          # Pull/push sync, accepts ISO8601 or epoch timestamps
-└── services/            # Business logic (auth, minio, ai, sync, reports)
-    ├── sync_service.py  # Scope resolver for granular access, push/pull processing
-    └── inspection_service.py  # recompute_flat_inspection_status, initialize_flat_checklist, backfill_uninitialized_flats
-alembic/                 # DB migrations
+│   ├── deps.py          # get_db, get_current_user (rejects CONTRACTOR), get_current_user_allow_all, require_manager/inspector/contractor
+│   ├── users.py         # User CRUD + project/building/flat assignment endpoints + contractor field validation + orphan-check deactivation
+│   ├── inspections.py   # /flats/{id}/entries, /entries/snags, /entries/{id} (PATCH blocks snag_fix_status transitions)
+│   ├── contractor_entries.py  # /entries/my-assigned, /entries/{id}/mark-fixed|verify|reject, verification-queue, orphaned-assignments, assign-contractor
+│   ├── entry_helpers.py # entry_to_response() — denormalizes contractor_assignments onto InspectionEntryResponse
+│   ├── contractors.py   # 410 Gone stubs for the retired /contractors CRUD (contractors are users now)
+│   ├── checklists.py    # Template CRUD + seed-defaults + seed-hierarchy (seeds 4 demo contractors)
+│   ├── media.py         # /files/upload with kind form field + role-gated NC/CLOSURE validation
+│   └── sync.py          # Pull/push sync, accepts ISO8601 or epoch timestamps; passes full User to service
+└── services/
+    ├── sync_service.py  # Role-branched pull/push; _resolve_scope (inspector/manager), _process_pull_contractor, _apply_contractor_op
+    └── inspection_service.py  # recompute_flat_inspection_status, initialize_flat_checklist (propagates trade), backfill_uninitialized_flats
+alembic/                 # DB migrations (001 initial, 002 building/flat assignments, 003 dedupe entries, 004 contractor role rollout)
+docs/                    # Design docs (contractor-role-rollout.md)
 ```
 
 ## Key API Areas (all under `/api/v1/`)
@@ -65,17 +78,28 @@ alembic/                 # DB migrations
   - `GET/POST /floors/{id}/flats`, `GET/PATCH/DELETE /flats/{id}`
 - **Inspections:**
   - `GET /flats/{id}/entries`, `GET/PATCH /entries/{id}`
-  - `GET /entries/snags` — cross-project list of snag entries (`status == "FAIL"`). Query params: `project_id`, `severity`, `category`, `snag_fix_status`, `skip`, `limit` (1–500, default 200). Powers the portal's Inspections page. Ordered by `updated_at DESC`.
+  - `GET /entries/snags` — cross-project list of snag entries (`status == "FAIL"`). Query params: `project_id`, `severity`, `category`, `snag_fix_status`, `contractor_id`, `skip`, `limit` (1–500, default 200). Powers the portal's Inspections page. Ordered by `updated_at DESC`. Response entries include `contractor_assignments` eager-loaded.
   - `POST /entries/{flatId}/initialize-checklist` — legacy idempotent fallback. Flats now auto-initialize on creation, so this endpoint is rarely called. Returns existing entries if already initialized, otherwise instantiates from templates.
-- **Media:** `POST /files/upload` (accepts optional `duration_ms` form field for voice/video), `GET /files/{key}?token=JWT` (proxied to/from MinIO, auth via query param for img/audio/video tags)
+- **Contractor / verification flow** (`app/api/contractor_entries.py` — registered before `inspections_router` in `main.py` so static segments like `/my-assigned` resolve before `/entries/{entry_id}`):
+  - `GET /entries/my-assigned?snag_fix_status=&skip=&limit=` (CONTRACTOR) — snags assigned to the caller, filterable by fix status.
+  - `POST /entries/{id}/mark-fixed` (CONTRACTOR) — transition OPEN→FIXED. Validates caller is the assigned contractor, `entry.status == "FAIL"`, and ≥1 `CLOSURE`-kind image exists. Clears `rejection_remark`/`rejected_at` if this is a re-fix after rejection.
+  - `POST /entries/{id}/verify` (MANAGER) — transition FIXED→VERIFIED with required `verification_remark`. Idempotent on already-VERIFIED (returns current state without overwriting the original remark).
+  - `POST /entries/{id}/reject` (MANAGER) — transition FIXED→OPEN with required `rejection_remark`. Clears `fixed_at`/`fixed_by_id` so the contractor can re-submit.
+  - `GET /entries/verification-queue?project_id=` (MANAGER) — FIXED entries awaiting verification, oldest first (FIFO).
+  - `GET /entries/orphaned-assignments` (MANAGER) — assignments whose contractor user is deactivated or no longer has role=CONTRACTOR. Powers the portal's reassignment queue.
+  - `POST /entries/{id}/assign-contractor/{contractor_id}?force=` (MANAGER) — validates contractor is active CONTRACTOR role and `entry.trade IN contractor.trades`; 409 `EXCLUSIVE_CONFLICT` if another assignment exists, unless `force=true` (deletes the existing row atomically first). Same `contractor_id` re-assignment is idempotent.
+  - `DELETE /entries/{id}/assign-contractor/{contractor_id}` (MANAGER) — unassign, 204.
+- **Media:** `POST /files/upload` requires `kind` form field (`"NC"` or `"CLOSURE"`) for image uploads, role-gated (INSPECTOR→NC, CONTRACTOR→CLOSURE, MANAGER→NC). Accepts optional `duration_ms` for voice/video. `GET /files/{key}?token=JWT` proxied to/from MinIO, auth via query param for img/audio/video tags.
 - **AI:** `POST /ai/describe-snag` (proxied to vLLM)
 - **Sync:** `POST /sync/pull` (accepts ISO8601 or epoch), `POST /sync/push`, `POST /sync/upload-file`
 - **Users:** CRUD + granular assignment:
   - `POST/DELETE /users/{id}/assign-project/{projectId}`
   - `POST/DELETE /users/{id}/assign-building/{buildingId}`
   - `POST/DELETE /users/{id}/assign-flat/{flatId}`
-  - UserResponse includes `assigned_project_ids`, `assigned_building_ids`, `assigned_flat_ids`
-- **Seed:** `POST /seed-hierarchy` (5 Godrej projects + towers/floors/flats), `POST /checklist-templates/seed-defaults` (templates + rooms + floor plans). Both reject if already seeded.
+  - UserResponse includes `assigned_project_ids`, `assigned_building_ids`, `assigned_flat_ids`, plus contractor fields `email`/`phone`/`company`/`trades` (trades + company populated only when role=CONTRACTOR).
+  - `POST /users` with `role=CONTRACTOR` requires `trades` as a non-empty list of valid taxonomy values; rejects `trades`/`company` on non-contractor roles. `PATCH /users/{id}` enforces the same contractor-only invariants and cannot leave a CONTRACTOR's `trades` empty.
+  - `PATCH /users/{id}` with `is_active=false` on a CONTRACTOR returns 409 `OPEN_ASSIGNMENTS` listing open (non-VERIFIED) snag entries unless `?force=true`. The portal uses the orphan list to drive a reassign-before-deactivate prompt.
+- **Seed:** `POST /seed-hierarchy` (5 Godrej projects + towers/floors/flats + 4 demo CONTRACTOR users with password `contractor123` covering PLUMBING / ELECTRICAL / TILING+PAINTING / CIVIL+CARPENTRY), `POST /checklist-templates/seed-defaults` (templates + rooms + floor plans; every template row carries a `trade` that propagates onto entries via `initialize_flat_checklist`). Both reject if already seeded.
 - **Dashboard:**
   - `GET /dashboard/projects/{id}/stats` — project-wide flat-status counts (from `Flat.inspection_status`) + snag severity/category breakdowns.
   - `GET /dashboard/projects/{id}/building-stats` — flat per-tower list (legacy; simpler shape, no floor nesting).
@@ -99,7 +123,10 @@ The scope resolver unions all three levels. Building-only assignments auto-inclu
 
 ## Sync Design (Android ↔ Backend)
 
-- **Pull:** `_resolve_scope()` computes accessible project/building/floor/flat IDs from all assignment levels. Returns only data within scope, filtered by `updated_at >= last_synced_at`. Always returns all `flat_type_rooms` and `floor_plan_layouts` (global, not time-filtered).
+- **Role branching:** `process_pull` / `process_push` take the full `User` object (`caller`) and dispatch on `caller.role`. CONTRACTOR hits a dedicated path (`_process_pull_contractor`, `_apply_contractor_op`); INSPECTOR / MANAGER hit the original hierarchy-based path.
+- **Pull (INSPECTOR/MANAGER):** `_resolve_scope()` computes accessible project/building/floor/flat IDs from all assignment levels. Returns only data within scope, filtered by `updated_at >= last_synced_at`. Always returns all `flat_type_rooms` and `floor_plan_layouts` (global, not time-filtered). `contractors` is now always an empty list (kept in the wire shape for Android client compatibility).
+- **Pull (CONTRACTOR):** returns **only** the entries the caller is currently assigned to via `snag_contractor_assignments` + the parent flat/floor/building/project hierarchy for navigation. No sibling entries, no templates, no room/layout definitions — a contractor cannot author checklists. `scope_snapshot` reflects the parent hierarchy so Android's prune-on-scope-diff logic still works on assignment revocation. Full hierarchy is delivered (bypassing `updated_at` filter) when the caller has an assignment granted after `last_synced_at`.
+- **Push (CONTRACTOR):** `_apply_contractor_op` restricts CONTRACTOR push to `UPDATE` on `inspection_entry` with **only** `snag_fix_status=FIXED` in `data`. Enforces: caller is the assigned contractor, `entry.status == "FAIL"`, current `snag_fix_status == "OPEN"`, and at least one `CLOSURE` image exists. All other ops (CREATE, DELETE, other entity types, other fields) are rejected. Same integrity guarantees as `POST /entries/{id}/mark-fixed` endpoint.
 - **`scope_snapshot` on every pull:** `SyncPullResponse.scope_snapshot` carries the complete set of IDs the user is currently entitled to — `{project_ids, building_ids, floor_ids, flat_ids}`. Serialized from the same `_resolve_scope()` output (no extra queries). The Android client diffs this against its local rows to prune anything that fell out of scope (e.g., a revoked assignment) without needing a full reset. This is how mid-session revocation propagates to the app on the next pull.
 - **Push:** Individual mutations from sync queue. `data` dict applied via `setattr` (skips `id` key). For `inspection_entry` CREATEs, `inspector_id` is auto-set. **CREATEs are idempotent** — if a record with the same ID already exists, it's accepted without inserting a duplicate. **Per-op SAVEPOINT** via `db.begin_nested()`: a DB-level failure on one op rolls back only that op, leaving prior-accepted ops and subsequent ops intact. Without this, any flush error would cascade on `db.commit()` and silently discard the entire batch while the client had already marked each op COMPLETED locally.
 - **File upload:** `POST /sync/upload-file` accepts multipart with `file`, `type` (snag_image/voice_note/inspection_video), `inspection_entry_id`, `client_id`, and optional `duration_ms` (for voice_note/inspection_video). Uploads to MinIO AND creates the DB record (SnagImage/VoiceNote/InspectionVideo) in one request. Returns `{ minio_key, size }`.

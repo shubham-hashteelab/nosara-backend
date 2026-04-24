@@ -77,6 +77,7 @@ from app.api.projects import router as projects_router  # noqa: E402
 from app.api.buildings import router as buildings_router  # noqa: E402
 from app.api.floors import router as floors_router  # noqa: E402
 from app.api.flats import router as flats_router  # noqa: E402
+from app.api.contractor_entries import router as contractor_entries_router  # noqa: E402
 from app.api.inspections import router as inspections_router  # noqa: E402
 from app.api.media import router as media_router  # noqa: E402
 from app.api.ai import router as ai_router  # noqa: E402
@@ -94,6 +95,10 @@ app.include_router(projects_router, prefix=API_PREFIX)
 app.include_router(buildings_router, prefix=API_PREFIX)
 app.include_router(floors_router, prefix=API_PREFIX)
 app.include_router(flats_router, prefix=API_PREFIX)
+# contractor_entries must be included BEFORE inspections so its static
+# segment routes (/entries/my-assigned, /entries/verification-queue,
+# /entries/orphaned-assignments) resolve before /entries/{entry_id}.
+app.include_router(contractor_entries_router, prefix=API_PREFIX)
 app.include_router(inspections_router, prefix=API_PREFIX)
 app.include_router(media_router, prefix=API_PREFIX)
 app.include_router(ai_router, prefix=API_PREFIX)

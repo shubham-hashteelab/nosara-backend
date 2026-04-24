@@ -45,8 +45,18 @@ class SnagContractorAssignmentResponse(BaseModel):
     id: uuid.UUID
     inspection_entry_id: uuid.UUID
     contractor_id: uuid.UUID
+    contractor_name: str
+    contractor_trades: list[str] = []
     assigned_at: datetime
     due_date: Optional[date] = None
     notes: Optional[str] = None
 
-    model_config = ConfigDict(from_attributes=True)
+
+class OrphanedAssignmentResponse(BaseModel):
+    assignment_id: uuid.UUID
+    inspection_entry_id: uuid.UUID
+    contractor_id: uuid.UUID
+    contractor_name: str
+    contractor_role: str
+    contractor_is_active: bool
+    assigned_at: datetime

@@ -1,8 +1,55 @@
 import uuid
-from datetime import datetime
-from typing import Optional
+from datetime import date, datetime
+from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
+
+
+class ContractorAssignmentBrief(BaseModel):
+    id: uuid.UUID
+    inspection_entry_id: uuid.UUID
+    contractor_id: uuid.UUID
+    contractor_name: str
+    contractor_trades: list[str] = []
+    assigned_at: datetime
+    due_date: Optional[date] = None
+    notes: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_orm(cls, data: Any) -> Any:
+        # When constructed from an ORM SnagContractorAssignment (the cascade
+        # path through SyncPullResponse / InspectionEntryResponse), the
+        # contractor_name and contractor_trades fields live on the loaded
+        # `.contractor` relationship, not as columns on the assignment.
+        # Flatten them here. Dict / kwargs input passes through unchanged.
+        if isinstance(data, dict):
+            return data
+        contractor = getattr(data, "contractor", None)
+        return {
+            "id": data.id,
+            "inspection_entry_id": data.inspection_entry_id,
+            "contractor_id": data.contractor_id,
+            "contractor_name": contractor.full_name if contractor else "",
+            "contractor_trades": (contractor.trades or []) if contractor else [],
+            "assigned_at": data.assigned_at,
+            "due_date": data.due_date,
+            "notes": data.notes,
+        }
+
+
+class MarkFixedRequest(BaseModel):
+    notes: Optional[str] = None
+
+
+class VerifyRequest(BaseModel):
+    verification_remark: str
+
+
+class RejectRequest(BaseModel):
+    rejection_remark: str
 
 
 class InspectionEntryCreate(BaseModel):
@@ -91,5 +138,6 @@ class InspectionEntryResponse(BaseModel):
     images: list[SnagImageResponse] = []
     voice_notes: list[VoiceNoteResponse] = []
     videos: list[InspectionVideoResponse] = []
+    contractor_assignments: list[ContractorAssignmentBrief] = []
 
     model_config = ConfigDict(from_attributes=True)

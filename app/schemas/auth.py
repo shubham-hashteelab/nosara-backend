@@ -15,12 +15,20 @@ class UserCreate(BaseModel):
     password: str
     full_name: str
     role: str  # MANAGER, INSPECTOR, or CONTRACTOR
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+    trades: Optional[list[str]] = None
 
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     password: Optional[str] = None
     is_active: Optional[bool] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+    trades: Optional[list[str]] = None
 
 
 class UserResponse(BaseModel):
@@ -30,6 +38,10 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+    trades: Optional[list[str]] = None
     assigned_project_ids: list[uuid.UUID] = []
     assigned_building_ids: list[uuid.UUID] = []
     assigned_flat_ids: list[uuid.UUID] = []

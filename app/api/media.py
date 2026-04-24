@@ -6,7 +6,8 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_current_user_allow_all, get_db
+from app.constants.trades import is_valid_snag_image_kind
 from app.models.inspection import InspectionEntry, InspectionVideo, SnagImage, VoiceNote
 from app.models.user import User
 from app.schemas.media import FileDeleteResponse, FileUploadResponse
@@ -20,9 +21,10 @@ async def upload_file(
     file: Annotated[UploadFile, File()],
     type: Annotated[str, Form()],  # "image", "voice", "video"
     inspection_entry_id: Annotated[str, Form()],
-    _user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_user_allow_all)],
     db: Annotated[AsyncSession, Depends(get_db)],
     duration_ms: Annotated[str | None, Form()] = None,
+    kind: Annotated[str | None, Form()] = None,
 ) -> FileUploadResponse:
     entry_uuid = uuid.UUID(inspection_entry_id)
     duration_int = 0
@@ -32,12 +34,52 @@ async def upload_file(
         except ValueError:
             duration_int = 0
 
+    # Contractors can only upload closure photos. They have no voice/video
+    # authoring surface at all.
+    if current_user.role == "CONTRACTOR" and type != "image":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Contractors can only upload images (CLOSURE kind)",
+        )
+
     # Validate entry exists
     result = await db.execute(
         select(InspectionEntry).where(InspectionEntry.id == entry_uuid)
     )
     if not result.scalars().first():
         raise HTTPException(status_code=404, detail="Inspection entry not found")
+
+    # Role-based kind gating for images.
+    if type == "image":
+        if kind is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="kind is required for image uploads (NC or CLOSURE)",
+            )
+        if not is_valid_snag_image_kind(kind):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid kind: {kind}. Must be NC or CLOSURE",
+            )
+        if current_user.role == "INSPECTOR" and kind != "NC":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Inspectors can only upload NC images",
+            )
+        if current_user.role == "CONTRACTOR" and kind != "CLOSURE":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Contractors can only upload CLOSURE images",
+            )
+        # Decision #6 in the rollout doc: only contractors upload closure
+        # photos. Managers can still upload NC images (e.g. during triage
+        # or QA) but never a CLOSURE that would satisfy a contractor's
+        # mark-fixed precondition.
+        if current_user.role == "MANAGER" and kind != "NC":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only contractors can upload CLOSURE images",
+            )
 
     # Read file bytes
     file_bytes = await file.read()
@@ -61,6 +103,7 @@ async def upload_file(
             minio_key=minio_key,
             original_filename=file.filename,
             file_size_bytes=file_size,
+            kind=kind,
         )
         db.add(record)
         await db.commit()

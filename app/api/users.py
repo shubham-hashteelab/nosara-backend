@@ -8,6 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db, require_manager
+from app.constants.trades import VALID_TRADES, is_valid_trade
+from app.models.contractor import SnagContractorAssignment
+from app.models.inspection import InspectionEntry
 from app.models.user import User, UserProjectAssignment, UserBuildingAssignment, UserFlatAssignment
 from app.models.project import Project
 from app.models.building import Building
@@ -55,10 +58,24 @@ def _user_to_response(user: User) -> UserResponse:
         role=user.role,
         is_active=user.is_active,
         created_at=user.created_at,
+        email=user.email,
+        phone=user.phone,
+        company=user.company,
+        trades=user.trades,
         assigned_project_ids=[a.project_id for a in user.project_assignments],
         assigned_building_ids=[a.building_id for a in user.building_assignments],
         assigned_flat_ids=[a.flat_id for a in user.flat_assignments],
     )
+
+
+def _validate_trades(trades: list[str]) -> None:
+    """Validate every trade value against the taxonomy. Raises 400 on mismatch."""
+    for t in trades:
+        if not is_valid_trade(t):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid trade: {t}. Valid trades: {sorted(VALID_TRADES)}",
+            )
 
 
 def _load_assignments():
@@ -289,11 +306,29 @@ async def create_user(
             detail="Role must be MANAGER, INSPECTOR, or CONTRACTOR",
         )
 
+    if body.role == "CONTRACTOR":
+        if not body.trades:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="trades is required and must be non-empty for CONTRACTOR role",
+            )
+        _validate_trades(body.trades)
+    else:
+        if body.trades is not None or body.company is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="trades and company are only valid for CONTRACTOR role",
+            )
+
     user = User(
         username=body.username,
         password_hash=hash_password(body.password),
         full_name=body.full_name,
         role=body.role,
+        email=body.email,
+        phone=body.phone,
+        company=body.company if body.role == "CONTRACTOR" else None,
+        trades=body.trades if body.role == "CONTRACTOR" else None,
     )
     db.add(user)
     await db.commit()
@@ -464,6 +499,7 @@ async def update_user(
     body: UserUpdate,
     _manager: Annotated[User, Depends(require_manager)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
 ) -> UserResponse:
     result = await db.execute(
         select(User).options(*_load_assignments()).where(User.id == user_id)
@@ -472,12 +508,84 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Contractor-only fields: validate role compatibility before applying any
+    # mutation so we don't half-apply on reject.
+    if body.company is not None and user.role != "CONTRACTOR":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="company can only be set on CONTRACTOR users",
+        )
+    if body.trades is not None:
+        if user.role != "CONTRACTOR":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="trades can only be set on CONTRACTOR users",
+            )
+        if len(body.trades) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="trades cannot be empty for a CONTRACTOR",
+            )
+        _validate_trades(body.trades)
+
+    # Guard contractor deactivation against silently orphaning open snags.
+    # "Open" = anything not yet VERIFIED by a manager (OPEN or FIXED).
+    if (
+        body.is_active is False
+        and user.is_active is True
+        and user.role == "CONTRACTOR"
+        and not force
+    ):
+        open_q = await db.execute(
+            select(
+                SnagContractorAssignment.inspection_entry_id,
+                InspectionEntry.item_name,
+                InspectionEntry.snag_fix_status,
+            )
+            .join(
+                InspectionEntry,
+                InspectionEntry.id == SnagContractorAssignment.inspection_entry_id,
+            )
+            .where(
+                SnagContractorAssignment.contractor_id == user_id,
+                InspectionEntry.snag_fix_status != "VERIFIED",
+            )
+        )
+        rows = open_q.all()
+        if rows:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "OPEN_ASSIGNMENTS",
+                    "message": (
+                        "Contractor has open assignments. Reassign them first "
+                        "or retry with ?force=true."
+                    ),
+                    "entries": [
+                        {
+                            "entry_id": str(r[0]),
+                            "item_name": r[1],
+                            "snag_fix_status": r[2],
+                        }
+                        for r in rows
+                    ],
+                },
+            )
+
     if body.full_name is not None:
         user.full_name = body.full_name
     if body.password is not None:
         user.password_hash = hash_password(body.password)
     if body.is_active is not None:
         user.is_active = body.is_active
+    if body.email is not None:
+        user.email = body.email
+    if body.phone is not None:
+        user.phone = body.phone
+    if body.company is not None:
+        user.company = body.company
+    if body.trades is not None:
+        user.trades = body.trades
 
     await db.commit()
     await db.refresh(user)

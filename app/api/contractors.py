@@ -7,9 +7,9 @@ router = APIRouter(tags=["contractors"])
 
 _GONE_BODY = {
     "detail": (
-        "This endpoint is retired. Contractor management is being moved onto the "
-        "User model (role=CONTRACTOR) as part of the contractor role rollout. "
-        "New endpoints ship in Phase 2."
+        "Contractors are now users with role=CONTRACTOR. Manage them via "
+        "/api/v1/users endpoints. Snag assignment lives at "
+        "/api/v1/entries/{id}/assign-contractor/{contractor_id}."
     )
 }
 
@@ -40,18 +40,4 @@ async def update_contractor_gone(contractor_id: uuid.UUID) -> JSONResponse:
 
 @router.delete("/contractors/{contractor_id}")
 async def delete_contractor_gone(contractor_id: uuid.UUID) -> JSONResponse:
-    return _gone()
-
-
-@router.post("/entries/{entry_id}/assign-contractor/{contractor_id}")
-async def assign_contractor_gone(
-    entry_id: uuid.UUID, contractor_id: uuid.UUID
-) -> JSONResponse:
-    return _gone()
-
-
-@router.delete("/entries/{entry_id}/assign-contractor/{contractor_id}")
-async def unassign_contractor_gone(
-    entry_id: uuid.UUID, contractor_id: uuid.UUID
-) -> JSONResponse:
     return _gone()

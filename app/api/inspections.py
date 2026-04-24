@@ -7,7 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user, get_db
+from app.api.entry_helpers import entry_to_response
 from app.models.building import Building
+from app.models.contractor import SnagContractorAssignment
 from app.models.flat import Flat
 from app.models.floor import Floor
 from app.models.inspection import InspectionEntry
@@ -25,6 +27,17 @@ from app.services.inspection_service import (
 router = APIRouter(tags=["inspections"])
 
 
+def _entry_load_options():
+    return (
+        selectinload(InspectionEntry.images),
+        selectinload(InspectionEntry.voice_notes),
+        selectinload(InspectionEntry.videos),
+        selectinload(InspectionEntry.contractor_assignments).selectinload(
+            SnagContractorAssignment.contractor
+        ),
+    )
+
+
 @router.get("/entries/snags", response_model=list[InspectionEntryResponse])
 async def list_snag_entries(
     _user: Annotated[User, Depends(get_current_user)],
@@ -33,6 +46,7 @@ async def list_snag_entries(
     severity: Annotated[str | None, Query()] = None,
     category: Annotated[str | None, Query()] = None,
     snag_fix_status: Annotated[str | None, Query()] = None,
+    contractor_id: Annotated[uuid.UUID | None, Query()] = None,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> list[InspectionEntryResponse]:
@@ -42,15 +56,10 @@ async def list_snag_entries(
     """
     stmt = (
         select(InspectionEntry)
-        .options(
-            selectinload(InspectionEntry.images),
-            selectinload(InspectionEntry.voice_notes),
-            selectinload(InspectionEntry.videos),
-        )
+        .options(*_entry_load_options())
         .where(InspectionEntry.status == "FAIL")
     )
 
-    # Filtering by project requires joining through flat → floor → building.
     if project_id is not None:
         stmt = (
             stmt.join(Flat, Flat.id == InspectionEntry.flat_id)
@@ -65,12 +74,17 @@ async def list_snag_entries(
         stmt = stmt.where(InspectionEntry.category == category)
     if snag_fix_status:
         stmt = stmt.where(InspectionEntry.snag_fix_status == snag_fix_status)
+    if contractor_id is not None:
+        stmt = stmt.join(
+            SnagContractorAssignment,
+            SnagContractorAssignment.inspection_entry_id == InspectionEntry.id,
+        ).where(SnagContractorAssignment.contractor_id == contractor_id)
 
     stmt = stmt.order_by(InspectionEntry.updated_at.desc()).offset(skip).limit(limit)
 
     result = await db.execute(stmt)
     entries = result.scalars().all()
-    return [InspectionEntryResponse.model_validate(e) for e in entries]
+    return [entry_to_response(e) for e in entries]
 
 
 @router.get(
@@ -83,16 +97,12 @@ async def list_entries(
 ) -> list[InspectionEntryResponse]:
     result = await db.execute(
         select(InspectionEntry)
-        .options(
-            selectinload(InspectionEntry.images),
-            selectinload(InspectionEntry.voice_notes),
-            selectinload(InspectionEntry.videos),
-        )
+        .options(*_entry_load_options())
         .where(InspectionEntry.flat_id == flat_id)
         .order_by(InspectionEntry.room_label, InspectionEntry.category)
     )
     entries = result.scalars().all()
-    return [InspectionEntryResponse.model_validate(e) for e in entries]
+    return [entry_to_response(e) for e in entries]
 
 
 @router.post(
@@ -124,18 +134,13 @@ async def create_entry(
     db.add(entry)
     await db.commit()
 
-    # Reload with relationships
     result = await db.execute(
         select(InspectionEntry)
-        .options(
-            selectinload(InspectionEntry.images),
-            selectinload(InspectionEntry.voice_notes),
-            selectinload(InspectionEntry.videos),
-        )
+        .options(*_entry_load_options())
         .where(InspectionEntry.id == entry.id)
     )
     entry = result.scalars().first()
-    return InspectionEntryResponse.model_validate(entry)
+    return entry_to_response(entry)
 
 
 @router.get("/entries/{entry_id}", response_model=InspectionEntryResponse)
@@ -146,17 +151,13 @@ async def get_entry(
 ) -> InspectionEntryResponse:
     result = await db.execute(
         select(InspectionEntry)
-        .options(
-            selectinload(InspectionEntry.images),
-            selectinload(InspectionEntry.voice_notes),
-            selectinload(InspectionEntry.videos),
-        )
+        .options(*_entry_load_options())
         .where(InspectionEntry.id == entry_id)
     )
     entry = result.scalars().first()
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
-    return InspectionEntryResponse.model_validate(entry)
+    return entry_to_response(entry)
 
 
 @router.patch("/entries/{entry_id}", response_model=InspectionEntryResponse)
@@ -173,6 +174,24 @@ async def update_entry(
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
 
+    # snag_fix_status transitions must go through the dedicated endpoints so
+    # the timeline columns (fixed_at, verified_at, rejection_remark, ...)
+    # stay consistent. PATCH may carry snag_fix_status as part of a bulk
+    # update from the Android app, but only as an idempotent no-op. Any
+    # actual transition is rejected.
+    if (
+        body.snag_fix_status is not None
+        and body.snag_fix_status != entry.snag_fix_status
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Use /entries/{id}/mark-fixed, /entries/{id}/verify, or "
+                f"/entries/{{id}}/reject to transition snag_fix_status from "
+                f"{entry.snag_fix_status}."
+            ),
+        )
+
     for field in ("status", "severity", "notes", "snag_fix_status", "room_label", "category", "item_name"):
         value = getattr(body, field, None)
         if value is not None:
@@ -180,22 +199,16 @@ async def update_entry(
 
     await db.commit()
 
-    # Recompute flat inspection status after entry update
     await recompute_flat_inspection_status(entry.flat_id, db)
     await db.commit()
 
-    # Reload with relationships
     result = await db.execute(
         select(InspectionEntry)
-        .options(
-            selectinload(InspectionEntry.images),
-            selectinload(InspectionEntry.voice_notes),
-            selectinload(InspectionEntry.videos),
-        )
+        .options(*_entry_load_options())
         .where(InspectionEntry.id == entry.id)
     )
     entry = result.scalars().first()
-    return InspectionEntryResponse.model_validate(entry)
+    return entry_to_response(entry)
 
 
 @router.post(
@@ -229,13 +242,9 @@ async def initialize_checklist(
 
     result = await db.execute(
         select(InspectionEntry)
-        .options(
-            selectinload(InspectionEntry.images),
-            selectinload(InspectionEntry.voice_notes),
-            selectinload(InspectionEntry.videos),
-        )
+        .options(*_entry_load_options())
         .where(InspectionEntry.flat_id == flat_id)
         .order_by(InspectionEntry.room_label, InspectionEntry.category)
     )
     entries = list(result.scalars().all())
-    return [InspectionEntryResponse.model_validate(e) for e in entries]
+    return [entry_to_response(e) for e in entries]

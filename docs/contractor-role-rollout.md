@@ -1,6 +1,14 @@
 # Contractor Role Rollout
 
-**Status:** planning — not yet implemented.
+**Status:** backend complete (Phase 1 + 2 shipped); portal + Android work pending.
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Backend schema + seed wipe | **shipped** — commit `43b1816` on 2026-04-24 |
+| 2 | Backend contractor / verification API | **shipped** — see commit with this doc update |
+| 3 | Portal UI (Business Associates, verification queue, assignment UI, trade selector) | not started |
+| 4 | Android contractor surface (ContractorHome, closure photo flow, contractor sync branch on-device) | not started |
+
 **Scope:** all three repos (nosara-backend, nosara-portal, nosara Android).
 **Origin:** resolves the "Contractor assignment is a write-only black hole" problem tracked in `nosara-portal/problems.md`.
 
@@ -151,21 +159,28 @@ Fields crossing the sync boundary must be renamed consistently:
 
 ## Phasing
 
-### Phase 1 — Backend schema + seed wipe (1 PR)
+### Phase 1 — Backend schema + seed wipe (1 PR) — ✅ shipped (commit `43b1816`)
 
-- Alembic migration: add columns, migrate `contractors` → `users`, drop `contractors`, repoint FK, change uniqueness, backfill `snag_images.kind`.
-- Seed script: wipe `checklist_templates` and re-seed with `trade` populated per row.
-- Validate: run migration locally against a snapshot of pod data, spot-check user rows, spot-check orphaned assignments after a simulated contractor deactivation.
-- **No API changes yet.** Purely schema.
+Destructive migration chosen over data-preserving path: pod data wipes daily, no live contractor data exists to preserve.
 
-### Phase 2 — Backend APIs
+- Alembic migration `004_contractor_role_rollout`: drop `contractors` table, rebuild `snag_contractor_assignments` with FK → `users.id` + unique on `inspection_entry_id` alone, add `email`/`phone`/`company`/`trades` to `users`, add `trade` + fix/verify/reject timeline columns to `inspection_entries`, add `trade` to `checklist_templates`, add `kind` to `snag_images`.
+- `app/constants/trades.py`: trade taxonomy + `VALID_SNAG_IMAGE_KINDS`.
+- `seed-hierarchy` now also creates 4 demo CONTRACTOR users (password `contractor123`). `initialize_flat_checklist` propagates `trade` from template to entry.
+- 410 Gone stubs for the old `/contractors` CRUD (contractors are users now — manage via `/users`).
+- Temporary Phase 1 fence in `get_current_user` rejecting CONTRACTOR tokens; removed in Phase 2.
 
-- Add `require_contractor` dep.
-- Implement all new endpoints + changes listed above.
-- Update `sync_service._resolve_scope()` with a CONTRACTOR branch.
-- Update `process_push` to accept contractor ops.
-- Update `InspectionEntryResponse` + snag-list endpoint to eager-load `contractor_assignments`.
-- Add `kind` handling to `/files/upload` + `/sync/upload-file`.
+### Phase 2 — Backend APIs — ✅ shipped
+
+- Auth: `get_current_user` refactored to share `_authenticate` with new `get_current_user_allow_all`; `get_current_user` still rejects CONTRACTOR so existing inspector/manager routes stay safe with zero code changes. New `require_contractor` dep chains through `allow_all`.
+- New router `app/api/contractor_entries.py` (registered before `inspections_router` so `/entries/my-assigned` etc. resolve before `/entries/{entry_id}`): `GET /entries/my-assigned`, `POST /entries/{id}/mark-fixed` (CONTRACTOR); `POST /entries/{id}/verify`, `POST /entries/{id}/reject`, `GET /entries/verification-queue`, `GET /entries/orphaned-assignments`, `POST + DELETE /entries/{id}/assign-contractor/{contractor_id}` (MANAGER).
+- `POST /entries/{id}/assign-contractor/{contractor_id}` validates `entry.trade IN contractor.trades` and enforces one-active-per-entry with `?force=true` to replace.
+- `PATCH /users/{id}` + `POST /users` enforce contractor-only field invariants (`trades` required + non-empty for CONTRACTOR, forbidden otherwise). Deactivating a CONTRACTOR with open (non-VERIFIED) assignments returns 409 with the orphan list unless `?force=true`.
+- `update_entry` PATCH hard-blocks any `snag_fix_status` change that isn't an idempotent no-op — transitions go through the dedicated endpoints only.
+- `sync_service.process_push` accepts `caller: User` and branches on role. `_apply_contractor_op` locks CONTRACTOR push to `UPDATE` on `inspection_entry` with only `snag_fix_status=FIXED`; same integrity rules as `/mark-fixed` (status FAIL, current OPEN, ≥1 CLOSURE image, caller is the assigned contractor).
+- `sync_service.process_pull` branches on role. `_process_pull_contractor` returns only the caller's assigned entries + parent hierarchy, no sibling entries, no templates / rooms / layouts.
+- `InspectionEntryResponse` gained `contractor_assignments` (denormalized contractor name + trades); all entry read endpoints (`/entries/{id}`, `/flats/{id}/entries`, `/entries/snags`, contractor + verification routes) eager-load via `selectinload(entry.contractor_assignments).selectinload(contractor)`. Shared builder in `app/api/entry_helpers.py`; Pydantic `model_validator(mode='before')` on `ContractorAssignmentBrief` handles the sync-pull ORM cascade path.
+- `/files/upload` + `/sync/upload-file` accept `kind` form field (`NC` / `CLOSURE`) for image uploads, role-gated: INSPECTOR → NC only, CONTRACTOR → CLOSURE only, MANAGER → NC only (decision #6: only contractors upload closure proof).
+- `/entries/snags` gained optional `contractor_id` query filter.
 
 ### Phase 3 — Portal
 

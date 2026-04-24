@@ -19,10 +19,12 @@ async def get_db() -> AsyncSession:  # type: ignore[misc]
         yield session
 
 
-async def get_current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
-    db: Annotated[AsyncSession, Depends(get_db)],
+async def _authenticate(
+    credentials: HTTPAuthorizationCredentials,
+    db: AsyncSession,
 ) -> User:
+    """Decode the bearer token and return the active User row. Does not apply
+    any role-based gating — callers layer that on top."""
     token = credentials.credentials
     try:
         payload = decode_token(token)
@@ -48,19 +50,32 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
         )
-    # Phase 1 fence: CONTRACTOR role exists in data (demo seed) but has no
-    # dedicated endpoints yet. Reject here so they cannot reach inspector /
-    # manager-gated routes. Phase 2 removes this block and routes CONTRACTOR
-    # users to their own endpoints instead.
+    return user
+
+
+async def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """Default auth dep. Rejects CONTRACTOR so existing inspector/manager
+    routes can adopt this without per-route role checks and stay safe."""
+    user = await _authenticate(credentials, db)
     if user.role == "CONTRACTOR":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Contractor endpoints are not yet available. Phase 2 of the "
-                "contractor role rollout enables this role."
-            ),
+            detail="Contractor role cannot access this endpoint",
         )
     return user
+
+
+async def get_current_user_allow_all(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """Auth dep that accepts every active role including CONTRACTOR. Use only
+    on routes that branch on role internally (e.g. sync push/pull, file
+    upload) or that specifically serve contractors via require_contractor."""
+    return await _authenticate(credentials, db)
 
 
 async def require_manager(
@@ -81,5 +96,16 @@ async def require_inspector(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Inspector role required",
+        )
+    return current_user
+
+
+async def require_contractor(
+    current_user: Annotated[User, Depends(get_current_user_allow_all)],
+) -> User:
+    if current_user.role != "CONTRACTOR":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Contractor role required",
         )
     return current_user
