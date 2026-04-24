@@ -7,7 +7,7 @@
 | 1 | Backend schema + seed wipe | **shipped** — commit `43b1816` on 2026-04-24 |
 | 2 | Backend contractor / verification API | **shipped** — commit `c8c589f` on 2026-04-24 |
 | 3 | Portal UI (Business Associates, verification queue, assignment UI, trade selector) | **shipped** — `nosara-portal` commit `dcbbfc6` on 2026-04-24 |
-| 4 | Android contractor surface (ContractorHome, closure photo flow, contractor sync branch on-device) | not started |
+| 4 | Android contractor surface (ContractorHome, closure photo flow, contractor sync branch on-device) | **shipped** — `nosara` commit on 2026-04-24 (branch `feature/backend-integration`) |
 
 **Scope:** all three repos (nosara-backend, nosara-portal, nosara Android).
 **Origin:** resolves the "Contractor assignment is a write-only black hole" problem tracked in `nosara-portal/problems.md`.
@@ -195,24 +195,18 @@ Destructive migration chosen over data-preserving path: pod data wipes daily, no
 - Sidebar: new Verification Queue (ShieldCheck) + Orphaned Assignments (UserX) entries.
 - Type cleanup: `Contractor` / `ContractorCreate` / `ContractorUpdate` deleted from `src/types/api.ts`; every `specialty` reference purged. `SnagContractorAssignment` is now `ContractorAssignmentBrief` with denormalized `contractor_name` + `contractor_trades`.
 
-### Phase 4 — Android app (contractor surface)
+### Phase 4 — Android app (contractor surface) — ✅ shipped
 
-- Login ViewModel branches on `user.role`:
-  - `INSPECTOR` → existing `ProjectListScreen` root.
-  - `CONTRACTOR` → new `ContractorHomeScreen` root.
-- New screens:
-  - `ContractorHomeScreen`: list of assigned snags, filter chips (Open / Fixed / Verified + Rejected-visual-state), project filter, search.
-  - `ContractorSnagDetailScreen`: NC photos (read-only), inspector's notes + voice notes (read-only), location breadcrumb (Project > Tower > Floor > Flat > Room), closure photo capture (camera), upload queue state, "Mark Fixed" CTA (disabled until ≥1 closure photo uploaded), rejection remark banner if visible.
-- Room schema changes:
-  - `InspectionEntryEntity`: new columns `trade`, `fixedAt`, `fixedById`, `verifiedAt`, `verifiedById`, `verificationRemark`, `rejectionRemark`, `rejectedAt`.
-  - `SnagImageEntity`: new column `kind` (default `NC` for migration).
-  - `UserSessionEntity`: persist `role`, `trades` (CSV or JSON).
-  - Room migration bumps DB version.
-- Sync:
-  - `SyncManager` for CONTRACTOR: pulls assigned entries + hierarchy metadata. No template tables.
-  - Queue entries for `mark_fixed`, `closure_photo_upload` (reuses `fileLocalPath` pattern with `kind=CLOSURE`).
-  - Post-save immediate sync reuses existing flow.
-- UI principles stay the same: no sync toggles, no manual refresh needed — pull-to-refresh exists as an escape hatch, everything else is background.
+- `LoginViewModel` branches on `user.role`: INSPECTOR → existing `ProjectListScreen`; CONTRACTOR → new `ContractorHomeScreen`; MANAGER → blocked with error ("use the web portal"), token not persisted. `LoginState.Success` carries the role.
+- Cold-start routing: new `NavHostViewModel` reads token + Room session role via a `flow {}` + `StateFlow`; `NosaraNavHost` renders a blank surface until the first non-null emission, so a persisted CONTRACTOR session never flashes the inspector root.
+- New screens in `ui/contractor/`: `ContractorHomeScreen` (filter chips All/Open/Fixed/Verified/Rework + search + pull-to-refresh + SyncStatusStrip), `ContractorSnagDetailScreen` (rejection banner keyed on `rejectedAt != null`, NC photos read-only, inspector notes, closure photo capture via `InAppCamera`, Mark Fixed CTA with SAVED morph).
+- Room migration `Migration4to5.kt` (DB v4 → v5, non-destructive `ALTER TABLE` + CREATE TABLE): adds `trade`/`fixedAt`/`fixedById`/`verifiedAt`/`verifiedById`/`verificationRemark`/`rejectionRemark`/`rejectedAt` on `inspection_entries`, `kind` on `snag_images`, `trades` on `user_session`, and creates `snag_contractor_assignments` with FK CASCADE from entries. `AppModule` replaces `fallbackToDestructiveMigration()` with `.addMigrations(Migration4to5)` so existing inspector installs upgrade cleanly.
+- `ApiModels.kt`: `TokenUser.trades`, `SyncInspectionEntry` carries trade + fix/verify/reject columns and embedded `contractor_assignments`. New `SyncContractorAssignment` data class. `NosaraApi.uploadFile` gains optional `kind` part.
+- `SyncManager`: persists `contractor_assignments` via new DAO (deletes entries' prior assignment rows before insert to propagate revocations), forwards `kind` from queue-row payload on file uploads. `wipeLocalDomainData` + `applyFullReplace` also wipe the assignments table.
+- `ContractorSnagRepository.markFixed` builds a literal payload map `{"snag_fix_status": "FIXED"}` — never entity serialization — so the client push strictly matches the backend's `_apply_contractor_op` whitelist. `markFixed` calls `syncManager.pushLocalChanges()` which drains file items (closure photos) before JSON ops within one invocation, satisfying the backend's ≥1 CLOSURE image precondition.
+- Ordering + reliability fixes from review: closure-photo save and mark-fixed use separate event flows (avoiding `tryEmit` dropping in back-to-back emits); `PullToRefreshBox` spinner tracks `SyncState.Syncing` instead of a synchronous flag; FileProvider URI → File reconstruction replaced with `ContentResolver.openInputStream` for robustness; `loadLocation` uses `entry.filterNotNull().first()` instead of a polling loop.
+- Inspector-side carry-forward: `InspectionRepository.updateEntry` no longer stamps `snag_fix_status = VERIFIED` on PASS/NA entries (that collided with the Phase 4 lifecycle VERIFIED terminal state); FAIL still resets to OPEN, PASS/NA preserves the existing value.
+- UI principles unchanged: no sync toggles, no manual refresh required. Pull-to-refresh on the home screen is the only user-initiated sync control; everything else is background. Settings screen (profile + logout + URL config) stays reachable for both roles via the gear icon.
 
 ## Open implementation questions (to resolve during build, not now)
 
