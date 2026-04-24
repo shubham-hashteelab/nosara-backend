@@ -11,7 +11,7 @@ from app.models.inspection import (  # noqa: F401
     InspectionVideo,
     VideoFrameAnalysis,
 )
-from app.models.contractor import Contractor, SnagContractorAssignment  # noqa: F401
+from app.models.contractor import SnagContractorAssignment  # noqa: F401
 from app.models.checklist import (  # noqa: F401
     ChecklistTemplate,
     FlatTypeRoom,

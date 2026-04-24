@@ -14,7 +14,7 @@ class UserCreate(BaseModel):
     username: str
     password: str
     full_name: str
-    role: str  # MANAGER or INSPECTOR
+    role: str  # MANAGER, INSPECTOR, or CONTRACTOR
 
 
 class UserUpdate(BaseModel):

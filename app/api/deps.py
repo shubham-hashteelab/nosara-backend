@@ -48,6 +48,18 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
         )
+    # Phase 1 fence: CONTRACTOR role exists in data (demo seed) but has no
+    # dedicated endpoints yet. Reject here so they cannot reach inspector /
+    # manager-gated routes. Phase 2 removes this block and routes CONTRACTOR
+    # users to their own endpoints instead.
+    if user.role == "CONTRACTOR":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Contractor endpoints are not yet available. Phase 2 of the "
+                "contractor role rollout enables this role."
+            ),
+        )
     return user
 
 

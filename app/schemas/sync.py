@@ -9,7 +9,6 @@ from app.schemas.checklist import (
     FlatTypeRoomResponse,
     FloorPlanLayoutResponse,
 )
-from app.schemas.contractor import ContractorResponse
 from app.schemas.flat import FlatResponse
 from app.schemas.floor import FloorResponse
 from app.schemas.inspection import InspectionEntryResponse
@@ -61,7 +60,9 @@ class SyncPullResponse(BaseModel):
     floors: list[FloorResponse] = []
     flats: list[FlatResponse] = []
     inspection_entries: list[InspectionEntryResponse] = []
-    contractors: list[ContractorResponse] = []
+    # contractors are Phase 2. Kept in the wire shape as an untyped empty
+    # list so existing Android clients don't crash on missing key.
+    contractors: list[Any] = []
     checklist_templates: list[ChecklistTemplateResponse] = []
     flat_type_rooms: list[FlatTypeRoomResponse] = []
     floor_plan_layouts: list[FloorPlanLayoutResponse] = []

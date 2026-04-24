@@ -31,6 +31,7 @@ class SnagImageResponse(BaseModel):
     minio_key: str
     original_filename: Optional[str] = None
     file_size_bytes: Optional[int] = None
+    kind: str = "NC"
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -77,6 +78,14 @@ class InspectionEntryResponse(BaseModel):
     notes: Optional[str] = None
     snag_fix_status: str
     inspector_id: Optional[uuid.UUID] = None
+    trade: str = "MISC"
+    fixed_at: Optional[datetime] = None
+    fixed_by_id: Optional[uuid.UUID] = None
+    verified_at: Optional[datetime] = None
+    verified_by_id: Optional[uuid.UUID] = None
+    verification_remark: Optional[str] = None
+    rejection_remark: Optional[str] = None
+    rejected_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
     images: list[SnagImageResponse] = []

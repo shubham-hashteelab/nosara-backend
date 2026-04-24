@@ -9,7 +9,6 @@ from sqlalchemy.orm import selectinload
 
 from app.models.building import Building
 from app.models.checklist import ChecklistTemplate, FlatTypeRoom, FloorPlanLayout
-from app.models.contractor import Contractor
 from app.models.flat import Flat
 from app.models.floor import Floor
 from app.models.inspection import InspectionEntry
@@ -27,7 +26,6 @@ ENTITY_MODEL_MAP: dict[str, Any] = {
     "floor": Floor,
     "flat": Flat,
     "inspection_entry": InspectionEntry,
-    "contractor": Contractor,
     "checklist_template": ChecklistTemplate,
     "flat_type_room": FlatTypeRoom,
     "floor_plan_layout": FloorPlanLayout,
@@ -349,10 +347,9 @@ class SyncService:
         entries = entries_q.scalars().all()
 
         # Global data
-        contractors_q = await db.execute(
-            select(Contractor).where(Contractor.updated_at >= last_synced_at)
-        )
-        contractors = contractors_q.scalars().all()
+        # Contractors are Phase 2 of the contractor role rollout.
+        # Wire shape preserved so clients do not break on missing key.
+        contractors: list[Any] = []
 
         templates_q = await db.execute(
             select(ChecklistTemplate).where(ChecklistTemplate.updated_at >= last_synced_at)

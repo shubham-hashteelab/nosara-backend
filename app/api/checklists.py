@@ -23,6 +23,7 @@ from app.schemas.checklist import (
     FloorPlanLayoutResponse,
     FloorPlanLayoutUpdate,
 )
+from app.services.auth_service import hash_password
 from app.services.inspection_service import (
     initialize_flat_checklist,
     recompute_flat_inspection_status,
@@ -36,59 +37,98 @@ router = APIRouter(tags=["checklists"])
 
 SEED_CHECKLIST_ITEMS: list[dict] = [
     # LIVING_ROOM
-    {"room_type": "LIVING_ROOM", "category": "ELECTRICAL", "item_name": "Switches working", "sort_order": 1},
-    {"room_type": "LIVING_ROOM", "category": "ELECTRICAL", "item_name": "Lights working", "sort_order": 2},
-    {"room_type": "LIVING_ROOM", "category": "ELECTRICAL", "item_name": "Fan working", "sort_order": 3},
-    {"room_type": "LIVING_ROOM", "category": "PAINT", "item_name": "Wall paint finish", "sort_order": 4},
-    {"room_type": "LIVING_ROOM", "category": "PAINT", "item_name": "Ceiling paint", "sort_order": 5},
-    {"room_type": "LIVING_ROOM", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 6},
-    {"room_type": "LIVING_ROOM", "category": "CIVIL", "item_name": "Wall cracks or dampness", "sort_order": 7},
-    {"room_type": "LIVING_ROOM", "category": "DOORS_WINDOWS", "item_name": "Main door ok", "sort_order": 8},
-    {"room_type": "LIVING_ROOM", "category": "DOORS_WINDOWS", "item_name": "Windows open/close properly", "sort_order": 9},
+    {"room_type": "LIVING_ROOM", "category": "ELECTRICAL", "item_name": "Switches working", "trade": "ELECTRICAL", "sort_order": 1},
+    {"room_type": "LIVING_ROOM", "category": "ELECTRICAL", "item_name": "Lights working", "trade": "ELECTRICAL", "sort_order": 2},
+    {"room_type": "LIVING_ROOM", "category": "ELECTRICAL", "item_name": "Fan working", "trade": "ELECTRICAL", "sort_order": 3},
+    {"room_type": "LIVING_ROOM", "category": "PAINT", "item_name": "Wall paint finish", "trade": "PAINTING", "sort_order": 4},
+    {"room_type": "LIVING_ROOM", "category": "PAINT", "item_name": "Ceiling paint", "trade": "PAINTING", "sort_order": 5},
+    {"room_type": "LIVING_ROOM", "category": "CIVIL", "item_name": "Floor tiles ok", "trade": "TILING", "sort_order": 6},
+    {"room_type": "LIVING_ROOM", "category": "CIVIL", "item_name": "Wall cracks or dampness", "trade": "CIVIL", "sort_order": 7},
+    {"room_type": "LIVING_ROOM", "category": "DOORS_WINDOWS", "item_name": "Main door ok", "trade": "CARPENTRY", "sort_order": 8},
+    {"room_type": "LIVING_ROOM", "category": "DOORS_WINDOWS", "item_name": "Windows open/close properly", "trade": "CARPENTRY", "sort_order": 9},
     # BEDROOM
-    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "Switches working", "sort_order": 1},
-    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "Lights working", "sort_order": 2},
-    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "Fan working", "sort_order": 3},
-    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "AC point available", "sort_order": 4},
-    {"room_type": "BEDROOM", "category": "PAINT", "item_name": "Wall paint finish", "sort_order": 5},
-    {"room_type": "BEDROOM", "category": "PAINT", "item_name": "Ceiling paint", "sort_order": 6},
-    {"room_type": "BEDROOM", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 7},
-    {"room_type": "BEDROOM", "category": "CIVIL", "item_name": "Wall cracks or dampness", "sort_order": 8},
-    {"room_type": "BEDROOM", "category": "DOORS_WINDOWS", "item_name": "Door opens/closes properly", "sort_order": 9},
-    {"room_type": "BEDROOM", "category": "DOORS_WINDOWS", "item_name": "Windows open/close properly", "sort_order": 10},
+    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "Switches working", "trade": "ELECTRICAL", "sort_order": 1},
+    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "Lights working", "trade": "ELECTRICAL", "sort_order": 2},
+    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "Fan working", "trade": "ELECTRICAL", "sort_order": 3},
+    {"room_type": "BEDROOM", "category": "ELECTRICAL", "item_name": "AC point available", "trade": "ELECTRICAL", "sort_order": 4},
+    {"room_type": "BEDROOM", "category": "PAINT", "item_name": "Wall paint finish", "trade": "PAINTING", "sort_order": 5},
+    {"room_type": "BEDROOM", "category": "PAINT", "item_name": "Ceiling paint", "trade": "PAINTING", "sort_order": 6},
+    {"room_type": "BEDROOM", "category": "CIVIL", "item_name": "Floor tiles ok", "trade": "TILING", "sort_order": 7},
+    {"room_type": "BEDROOM", "category": "CIVIL", "item_name": "Wall cracks or dampness", "trade": "CIVIL", "sort_order": 8},
+    {"room_type": "BEDROOM", "category": "DOORS_WINDOWS", "item_name": "Door opens/closes properly", "trade": "CARPENTRY", "sort_order": 9},
+    {"room_type": "BEDROOM", "category": "DOORS_WINDOWS", "item_name": "Windows open/close properly", "trade": "CARPENTRY", "sort_order": 10},
     # KITCHEN
-    {"room_type": "KITCHEN", "category": "ELECTRICAL", "item_name": "Switches working", "sort_order": 1},
-    {"room_type": "KITCHEN", "category": "ELECTRICAL", "item_name": "Lights working", "sort_order": 2},
-    {"room_type": "KITCHEN", "category": "ELECTRICAL", "item_name": "Exhaust point available", "sort_order": 3},
-    {"room_type": "KITCHEN", "category": "PLUMBING", "item_name": "Sink tap working", "sort_order": 4},
-    {"room_type": "KITCHEN", "category": "PLUMBING", "item_name": "Sink drainage ok", "sort_order": 5},
-    {"room_type": "KITCHEN", "category": "PLUMBING", "item_name": "No water leakage", "sort_order": 6},
-    {"room_type": "KITCHEN", "category": "CIVIL", "item_name": "Wall tiles ok", "sort_order": 7},
-    {"room_type": "KITCHEN", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 8},
-    {"room_type": "KITCHEN", "category": "FIXTURES", "item_name": "Kitchen platform level", "sort_order": 9},
-    {"room_type": "KITCHEN", "category": "DOORS_WINDOWS", "item_name": "Windows open/close properly", "sort_order": 10},
+    {"room_type": "KITCHEN", "category": "ELECTRICAL", "item_name": "Switches working", "trade": "ELECTRICAL", "sort_order": 1},
+    {"room_type": "KITCHEN", "category": "ELECTRICAL", "item_name": "Lights working", "trade": "ELECTRICAL", "sort_order": 2},
+    {"room_type": "KITCHEN", "category": "ELECTRICAL", "item_name": "Exhaust point available", "trade": "ELECTRICAL", "sort_order": 3},
+    {"room_type": "KITCHEN", "category": "PLUMBING", "item_name": "Sink tap working", "trade": "PLUMBING", "sort_order": 4},
+    {"room_type": "KITCHEN", "category": "PLUMBING", "item_name": "Sink drainage ok", "trade": "PLUMBING", "sort_order": 5},
+    {"room_type": "KITCHEN", "category": "PLUMBING", "item_name": "No water leakage", "trade": "PLUMBING", "sort_order": 6},
+    {"room_type": "KITCHEN", "category": "CIVIL", "item_name": "Wall tiles ok", "trade": "TILING", "sort_order": 7},
+    {"room_type": "KITCHEN", "category": "CIVIL", "item_name": "Floor tiles ok", "trade": "TILING", "sort_order": 8},
+    {"room_type": "KITCHEN", "category": "FIXTURES", "item_name": "Kitchen platform level", "trade": "CIVIL", "sort_order": 9},
+    {"room_type": "KITCHEN", "category": "DOORS_WINDOWS", "item_name": "Windows open/close properly", "trade": "CARPENTRY", "sort_order": 10},
     # BATHROOM
-    {"room_type": "BATHROOM", "category": "ELECTRICAL", "item_name": "Light & exhaust working", "sort_order": 1},
-    {"room_type": "BATHROOM", "category": "ELECTRICAL", "item_name": "Geyser point available", "sort_order": 2},
-    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Taps working (hot & cold)", "sort_order": 3},
-    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Shower working", "sort_order": 4},
-    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Flush working", "sort_order": 5},
-    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Water drains properly", "sort_order": 6},
-    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "No leakage", "sort_order": 7},
-    {"room_type": "BATHROOM", "category": "CIVIL", "item_name": "Wall tiles ok", "sort_order": 8},
-    {"room_type": "BATHROOM", "category": "CIVIL", "item_name": "Floor tiles ok (not slippery)", "sort_order": 9},
-    {"room_type": "BATHROOM", "category": "DOORS_WINDOWS", "item_name": "Door opens/closes properly", "sort_order": 10},
+    {"room_type": "BATHROOM", "category": "ELECTRICAL", "item_name": "Light & exhaust working", "trade": "ELECTRICAL", "sort_order": 1},
+    {"room_type": "BATHROOM", "category": "ELECTRICAL", "item_name": "Geyser point available", "trade": "ELECTRICAL", "sort_order": 2},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Taps working (hot & cold)", "trade": "PLUMBING", "sort_order": 3},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Shower working", "trade": "PLUMBING", "sort_order": 4},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Flush working", "trade": "PLUMBING", "sort_order": 5},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "Water drains properly", "trade": "PLUMBING", "sort_order": 6},
+    {"room_type": "BATHROOM", "category": "PLUMBING", "item_name": "No leakage", "trade": "PLUMBING", "sort_order": 7},
+    {"room_type": "BATHROOM", "category": "CIVIL", "item_name": "Wall tiles ok", "trade": "TILING", "sort_order": 8},
+    {"room_type": "BATHROOM", "category": "CIVIL", "item_name": "Floor tiles ok (not slippery)", "trade": "TILING", "sort_order": 9},
+    {"room_type": "BATHROOM", "category": "DOORS_WINDOWS", "item_name": "Door opens/closes properly", "trade": "CARPENTRY", "sort_order": 10},
     # BALCONY
-    {"room_type": "BALCONY", "category": "ELECTRICAL", "item_name": "Light point available", "sort_order": 1},
-    {"room_type": "BALCONY", "category": "PLUMBING", "item_name": "Water drains properly", "sort_order": 2},
-    {"room_type": "BALCONY", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 3},
-    {"room_type": "BALCONY", "category": "CIVIL", "item_name": "Railing strong & proper height", "sort_order": 4},
-    {"room_type": "BALCONY", "category": "DOORS_WINDOWS", "item_name": "Sliding door works properly", "sort_order": 5},
+    {"room_type": "BALCONY", "category": "ELECTRICAL", "item_name": "Light point available", "trade": "ELECTRICAL", "sort_order": 1},
+    {"room_type": "BALCONY", "category": "PLUMBING", "item_name": "Water drains properly", "trade": "PLUMBING", "sort_order": 2},
+    {"room_type": "BALCONY", "category": "CIVIL", "item_name": "Floor tiles ok", "trade": "TILING", "sort_order": 3},
+    {"room_type": "BALCONY", "category": "CIVIL", "item_name": "Railing strong & proper height", "trade": "CIVIL", "sort_order": 4},
+    {"room_type": "BALCONY", "category": "DOORS_WINDOWS", "item_name": "Sliding door works properly", "trade": "CARPENTRY", "sort_order": 5},
     # COMMON_AREA
-    {"room_type": "COMMON_AREA", "category": "ELECTRICAL", "item_name": "Switches working", "sort_order": 1},
-    {"room_type": "COMMON_AREA", "category": "ELECTRICAL", "item_name": "Lights working", "sort_order": 2},
-    {"room_type": "COMMON_AREA", "category": "PAINT", "item_name": "Wall paint finish", "sort_order": 3},
-    {"room_type": "COMMON_AREA", "category": "CIVIL", "item_name": "Floor tiles ok", "sort_order": 4},
+    {"room_type": "COMMON_AREA", "category": "ELECTRICAL", "item_name": "Switches working", "trade": "ELECTRICAL", "sort_order": 1},
+    {"room_type": "COMMON_AREA", "category": "ELECTRICAL", "item_name": "Lights working", "trade": "ELECTRICAL", "sort_order": 2},
+    {"room_type": "COMMON_AREA", "category": "PAINT", "item_name": "Wall paint finish", "trade": "PAINTING", "sort_order": 3},
+    {"room_type": "COMMON_AREA", "category": "CIVIL", "item_name": "Floor tiles ok", "trade": "TILING", "sort_order": 4},
+]
+
+# Demo contractor users seeded alongside the project hierarchy so Phase 2 API
+# work has realistic role=CONTRACTOR rows to test against. All share the same
+# demo password; reset via user-management API after rollout.
+DEMO_CONTRACTOR_PASSWORD = "contractor123"
+DEMO_CONTRACTORS: list[dict] = [
+    {
+        "username": "rajan-mehta",
+        "full_name": "Rajan Mehta",
+        "email": "rajan.mehta@demo.in",
+        "phone": "+91-9800001001",
+        "company": "Mehta Plumbing Services",
+        "trades": ["PLUMBING"],
+    },
+    {
+        "username": "priya-electrical",
+        "full_name": "Priya Electrical Works",
+        "email": "priya@electrical-demo.in",
+        "phone": "+91-9800001002",
+        "company": "Priya Electricals Pvt Ltd",
+        "trades": ["ELECTRICAL"],
+    },
+    {
+        "username": "deepak-tilers",
+        "full_name": "Deepak Tilers Co",
+        "email": "deepak@tilers-demo.in",
+        "phone": "+91-9800001003",
+        "company": "Deepak Tile Works",
+        "trades": ["TILING", "PAINTING"],
+    },
+    {
+        "username": "suresh-civil",
+        "full_name": "Suresh Civil & Carpentry",
+        "email": "suresh@civil-demo.in",
+        "phone": "+91-9800001004",
+        "company": "Suresh Constructions",
+        "trades": ["CIVIL", "CARPENTRY"],
+    },
 ]
 
 SEED_FLAT_TYPE_ROOMS: list[dict] = [
@@ -194,6 +234,7 @@ async def create_checklist_template(
         room_type=body.room_type,
         category=body.category,
         item_name=body.item_name,
+        trade=body.trade,
         sort_order=body.sort_order,
         is_active=body.is_active,
     )
@@ -220,7 +261,7 @@ async def update_checklist_template(
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    for field in ("room_type", "category", "item_name", "sort_order", "is_active"):
+    for field in ("room_type", "category", "item_name", "trade", "sort_order", "is_active"):
         value = getattr(body, field, None)
         if value is not None:
             setattr(template, field, value)
@@ -271,6 +312,7 @@ async def seed_defaults(
             room_type=item["room_type"],
             category=item["category"],
             item_name=item["item_name"],
+            trade=item["trade"],
             sort_order=item["sort_order"],
         )
         db.add(template)
@@ -363,6 +405,31 @@ async def seed_hierarchy(
                     await recompute_flat_inspection_status(flat.id, db)
                     flat_count += 1
 
+    # Seed demo contractor users (role=CONTRACTOR) so Phase 2 API work has
+    # realistic rows to test against. Skip any that already exist by username.
+    demo_password_hash = hash_password(DEMO_CONTRACTOR_PASSWORD)
+    demo_contractor_count = 0
+    for contractor in DEMO_CONTRACTORS:
+        existing_user = await db.scalar(
+            select(User).where(User.username == contractor["username"])
+        )
+        if existing_user is not None:
+            continue
+        db.add(
+            User(
+                username=contractor["username"],
+                password_hash=demo_password_hash,
+                full_name=contractor["full_name"],
+                role="CONTRACTOR",
+                email=contractor["email"],
+                phone=contractor["phone"],
+                company=contractor["company"],
+                trades=contractor["trades"],
+                is_active=True,
+            )
+        )
+        demo_contractor_count += 1
+
     await db.commit()
 
     return {
@@ -371,6 +438,7 @@ async def seed_hierarchy(
         "buildings": building_count,
         "floors": floor_count,
         "flats": flat_count,
+        "demo_contractors": demo_contractor_count,
     }
 
 

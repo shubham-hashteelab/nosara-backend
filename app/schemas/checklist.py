@@ -10,6 +10,7 @@ class ChecklistTemplateCreate(BaseModel):
     room_type: str
     category: str
     item_name: str
+    trade: str
     sort_order: int = 0
     is_active: bool = True
 
@@ -18,6 +19,7 @@ class ChecklistTemplateUpdate(BaseModel):
     room_type: Optional[str] = None
     category: Optional[str] = None
     item_name: Optional[str] = None
+    trade: Optional[str] = None
     sort_order: Optional[int] = None
     is_active: Optional[bool] = None
 
@@ -28,6 +30,7 @@ class ChecklistTemplateResponse(BaseModel):
     room_type: str
     category: str
     item_name: str
+    trade: str = "MISC"
     sort_order: int
     is_active: bool
     created_at: datetime

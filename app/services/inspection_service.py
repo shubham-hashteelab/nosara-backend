@@ -104,6 +104,7 @@ async def initialize_flat_checklist(
                 room_label=room.label,
                 category=template.category,
                 item_name=template.item_name,
+                trade=template.trade,
                 status="NA",
                 snag_fix_status="OPEN",
                 inspector_id=inspector_id,

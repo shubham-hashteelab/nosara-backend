@@ -283,10 +283,10 @@ async def create_user(
             detail="Username already exists",
         )
 
-    if body.role not in ("MANAGER", "INSPECTOR"):
+    if body.role not in ("MANAGER", "INSPECTOR", "CONTRACTOR"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Role must be MANAGER or INSPECTOR",
+            detail="Role must be MANAGER, INSPECTOR, or CONTRACTOR",
         )
 
     user = User(

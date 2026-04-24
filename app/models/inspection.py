@@ -36,6 +36,26 @@ class InspectionEntry(Base):
     inspector_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
+    trade: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default="MISC"
+    )
+    fixed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    fixed_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    verified_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    verification_remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rejection_remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -46,7 +66,9 @@ class InspectionEntry(Base):
     )
 
     flat = relationship("Flat", back_populates="inspection_entries")
-    inspector = relationship("User")
+    inspector = relationship("User", foreign_keys=[inspector_id])
+    fixed_by = relationship("User", foreign_keys=[fixed_by_id])
+    verified_by = relationship("User", foreign_keys=[verified_by_id])
     images: Mapped[list["SnagImage"]] = relationship(
         back_populates="inspection_entry",
         cascade="all, delete-orphan",
@@ -85,6 +107,9 @@ class SnagImage(Base):
         String(255), nullable=True
     )
     file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="NC"
+    )  # NC, CLOSURE
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
