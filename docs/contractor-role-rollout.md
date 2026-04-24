@@ -5,8 +5,8 @@
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Backend schema + seed wipe | **shipped** — commit `43b1816` on 2026-04-24 |
-| 2 | Backend contractor / verification API | **shipped** — see commit with this doc update |
-| 3 | Portal UI (Business Associates, verification queue, assignment UI, trade selector) | not started |
+| 2 | Backend contractor / verification API | **shipped** — commit `c8c589f` on 2026-04-24 |
+| 3 | Portal UI (Business Associates, verification queue, assignment UI, trade selector) | **shipped** — `nosara-portal` commit `dcbbfc6` on 2026-04-24 |
 | 4 | Android contractor surface (ContractorHome, closure photo flow, contractor sync branch on-device) | not started |
 
 **Scope:** all three repos (nosara-backend, nosara-portal, nosara Android).
@@ -182,16 +182,18 @@ Destructive migration chosen over data-preserving path: pod data wipes daily, no
 - `/files/upload` + `/sync/upload-file` accept `kind` form field (`NC` / `CLOSURE`) for image uploads, role-gated: INSPECTOR → NC only, CONTRACTOR → CLOSURE only, MANAGER → NC only (decision #6: only contractors upload closure proof).
 - `/entries/snags` gained optional `contractor_id` query filter.
 
-### Phase 3 — Portal
+### Phase 3 — Portal — ✅ shipped
 
-- Merge "Business Associates" into the Users page OR keep as a separate page filtering `role=CONTRACTOR` — final call during implementation, but DB is unified.
-- User creation form: role picker (MANAGER/INSPECTOR/CONTRACTOR). For CONTRACTOR, surface trades multi-select + company field.
-- Login: block contractors with "Please log in from the mobile app."
-- InspectionDetailPage: render current assignment, closure photos (separated from NC), fix timeline (assigned → fixed → verified/rejected with timestamps).
-- Assignment dropdown filters contractors by `entry.trade`.
-- **New Verification Queue page** in sidebar: lists FIXED entries in manager's project scope, Verify/Reject actions, remark inputs.
-- Checklist Template editor: `trade` selector per item.
-- Orphan handling: deactivation dialog shows affected snags + reassignment path.
+- Business Associates kept as a separate `/contractors` page; data source switched to `GET /api/v1/users` filtered client-side for `role=CONTRACTOR` (backend doesn't yet accept `?role=`). CRUD via `/users`.
+- `UserFormDialog` rewritten with `lockedRole` prop, role-conditional trades multi-select + company fields, `is_active` toggle on edit, superRefine validation that mirrors the backend 400 on empty trades. The Users page hides CONTRACTOR from its role picker so Business Associates are only created from their dedicated page.
+- `AuthContext.login` throws `"CONTRACTOR_ROLE"` before persisting the token; `LoginPage` catches it and shows the mobile-app-only message. No contractor token ever reaches `localStorage`.
+- `InspectionDetailPage` reworked: `AssignmentCard` widget (trade-filtered dropdown, `?force=true` replace prompt on 409 `EXCLUSIVE_CONFLICT`), `FixTimeline` (5-node lifecycle; rejection banner keyed on `rejected_at !== null`, not on `snag_fix_status` alone), split `NCGallery` / `ClosureGallery` by `image.kind` (Closure gallery is FAIL-only), inline Verify/Reject buttons when `snag_fix_status === "FIXED"`, shared `RemarkDialog` for the remark input. The Fix Status select was removed since backend rejects direct PATCH transitions.
+- New `/verification-queue` page (MANAGER): FIFO table of FIXED entries with project filter, inline verify/reject via `RemarkDialog`.
+- New `/orphaned-assignments` page (MANAGER): lists assignments on deactivated or role-changed contractors. Reassign links jump to the inspection detail page.
+- Deactivating a Business Associate triggers a two-step `DeactivateContractorDialog`: first confirm, then on 409 `OPEN_ASSIGNMENTS` surfaces the orphan list with "Force-deactivate" or "Open Orphaned Assignments" actions.
+- Checklist template editor gained a Trade select (taxonomy values). Trade badge shown on each template row. `z.nativeEnum` swapped for `z.enum(Object.values(...))` per strict `erasableSyntaxOnly` convention.
+- Sidebar: new Verification Queue (ShieldCheck) + Orphaned Assignments (UserX) entries.
+- Type cleanup: `Contractor` / `ContractorCreate` / `ContractorUpdate` deleted from `src/types/api.ts`; every `specialty` reference purged. `SnagContractorAssignment` is now `ContractorAssignmentBrief` with denormalized `contractor_name` + `contractor_trades`.
 
 ### Phase 4 — Android app (contractor surface)
 
